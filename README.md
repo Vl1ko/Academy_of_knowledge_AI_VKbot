@@ -25,8 +25,8 @@
 
 1. Клонируйте репозиторий:
 ```bash
-git clone https://github.com/your-username/academy-bot.git
-cd academy-bot
+git clone https://github.com/Vl1ko/Academy_of_knowledge_AI_VKbot.git
+cd Academy_of_knowledge_AI_VKbot
 ```
 
 2. Создайте виртуальное окружение и активируйте его:

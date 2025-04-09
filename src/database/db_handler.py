@@ -20,6 +20,7 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     consultations = relationship("Consultation", back_populates="user")
     event_registrations = relationship("EventRegistration", back_populates="user")
+    chat_history = relationship("ChatHistory", back_populates="user")
 
 class Consultation(Base):
     __tablename__ = 'consultations'

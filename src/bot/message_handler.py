@@ -4,6 +4,7 @@ from typing import Tuple, Optional
 from ..ai.openai_handler import OpenAIHandler
 from ..ai.deepseek_handler import DeepSeekHandler
 from ..database.db_handler import DatabaseHandler
+from ..database.chat_history import ChatHistoryManager
 from .keyboard import Keyboard
 
 class MessageHandler:
@@ -11,73 +12,90 @@ class MessageHandler:
         self.openai = OpenAIHandler()
         self.deepseek = DeepSeekHandler()
         self.db = DatabaseHandler()
+        self.chat_history = ChatHistoryManager()
         self.keyboard = Keyboard()
         self.logger = logging.getLogger(__name__)
 
     def handle_message(self, message: str, user_id: int) -> Tuple[str, Optional[dict]]:
         """
-        Обработка входящего сообщения и генерация ответа
+        Process incoming message and generate response
         
         Args:
-            message: Текст сообщения
-            user_id: ID пользователя ВКонтакте
+            message: User message text
+            user_id: VK user ID
             
         Returns:
-            Tuple[str, Optional[dict]]: Ответ и клавиатура (если нужна)
+            Tuple[str, Optional[dict]]: Response and keyboard (if needed)
         """
         try:
-            # Определяем тип запроса с помощью NLP
-            intent = self._detect_intent(message)
+            # Save user message to history
+            self.chat_history.add_message(user_id, message, is_bot=False)
             
-            # Обрабатываем запрос в зависимости от его типа
+            # Get conversation context
+            context = self.chat_history.get_conversation_context(user_id)
+            
+            # Determine request type with NLP
+            intent = self._detect_intent(message, context)
+            
+            # Save intent to history
+            self.chat_history.add_message(user_id, message, is_bot=False, intent=intent)
+            
+            # Process request based on its type
             if intent == 'consultation':
-                return self._handle_consultation(message, user_id)
+                response, keyboard = self._handle_consultation(message, user_id, context)
             elif intent == 'registration':
-                return self._handle_registration(message, user_id)
+                response, keyboard = self._handle_registration(message, user_id, context)
             elif intent == 'information':
-                return self._handle_information(message)
+                response, keyboard = self._handle_information(message, context)
             else:
-                return self._handle_unknown(message)
+                response, keyboard = self._handle_unknown(message, context)
+            
+            # Save bot response to history
+            self.chat_history.add_message(user_id, response, is_bot=True)
+            
+            return response, keyboard
                 
         except Exception as e:
-            self.logger.error(f"Ошибка при обработке сообщения: {e}")
-            return "Извините, произошла ошибка. Пожалуйста, попробуйте позже.", None
+            self.logger.error(f"Error processing message: {e}")
+            error_message = "Sorry, an error occurred. Please try again later."
+            self.chat_history.add_message(user_id, error_message, is_bot=True)
+            return error_message, None
 
-    def _detect_intent(self, message: str) -> str:
-        """Определение типа запроса с помощью NLP"""
-        # Используем OpenAI для определения намерения
-        intent = self.openai.detect_intent(message)
+    def _detect_intent(self, message: str, context: str) -> str:
+        """Determine request type with NLP"""
+        # Use OpenAI to determine intent with context
+        intent = self.openai.detect_intent(message, context)
         return intent
 
-    def _handle_consultation(self, message: str, user_id: int) -> Tuple[str, Optional[dict]]:
-        """Обработка запроса на консультацию"""
-        # Проверяем, есть ли пользователь в базе
+    def _handle_consultation(self, message: str, user_id: int, context: str) -> Tuple[str, Optional[dict]]:
+        """Handle consultation request"""
+        # Check if user exists in database
         user_data = self.db.get_user(user_id)
         
         if not user_data:
-            # Если пользователя нет в базе, запрашиваем контактные данные
-            return "Для записи на консультацию, пожалуйста, укажите ваше имя и телефон.", self.keyboard.get_contact_keyboard()
+            # If user is not in database, request contact information
+            return "To schedule a consultation, please provide your name and phone number.", self.keyboard.get_contact_keyboard()
         
-        # Генерируем ответ с помощью AI
-        response = self.openai.generate_response(message, context=user_data)
+        # Generate response with AI using context
+        response = self.openai.generate_response(message, context=context, user_data=user_data)
         return response, self.keyboard.get_main_keyboard()
 
-    def _handle_registration(self, message: str, user_id: int) -> Tuple[str, Optional[dict]]:
-        """Обработка запроса на регистрацию на мероприятие"""
-        # Проверяем наличие свободных мест
+    def _handle_registration(self, message: str, user_id: int, context: str) -> Tuple[str, Optional[dict]]:
+        """Handle event registration request"""
+        # Check for available spots
         if self.db.check_event_availability():
-            # Сохраняем запись
+            # Save registration
             self.db.register_for_event(user_id)
-            return "Вы успешно записаны на мероприятие! Мы отправим вам подтверждение.", self.keyboard.get_main_keyboard()
+            return "You have been successfully registered for the event! We will send you a confirmation.", self.keyboard.get_main_keyboard()
         else:
-            return "К сожалению, на данное мероприятие нет свободных мест.", self.keyboard.get_main_keyboard()
+            return "Unfortunately, there are no available spots for this event.", self.keyboard.get_main_keyboard()
 
-    def _handle_information(self, message: str) -> Tuple[str, Optional[dict]]:
-        """Обработка информационного запроса"""
-        # Генерируем ответ с помощью AI
-        response = self.openai.generate_response(message)
+    def _handle_information(self, message: str, context: str) -> Tuple[str, Optional[dict]]:
+        """Handle information request"""
+        # Generate response with AI using context
+        response = self.openai.generate_response(message, context=context)
         return response, self.keyboard.get_info_keyboard()
 
-    def _handle_unknown(self, message: str) -> Tuple[str, Optional[dict]]:
-        """Обработка неизвестного запроса"""
-        return "Извините, я не совсем понял ваш запрос. Можете переформулировать?", self.keyboard.get_main_keyboard() 
+    def _handle_unknown(self, message: str, context: str) -> Tuple[str, Optional[dict]]:
+        """Handle unknown request"""
+        return "I'm sorry, I didn't quite understand your request. Could you rephrase it?", self.keyboard.get_main_keyboard() 

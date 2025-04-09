@@ -3,7 +3,7 @@ from typing import Dict, List
 from datetime import datetime, timedelta
 from collections import Counter
 
-from ..database.db_handler import DatabaseHandler
+from ..database.db_handler import DatabaseHandler, User, Event, Consultation
 from .excel_handler import ExcelHandler
 
 class Statistics:
@@ -14,16 +14,16 @@ class Statistics:
 
     def collect_daily_statistics(self) -> Dict:
         """
-        Сбор ежедневной статистики
+        Collect daily statistics
         
         Returns:
-            Dict: Словарь со статистикой
+            Dict: Dictionary with statistics
         """
         try:
             today = datetime.utcnow().date()
             yesterday = today - timedelta(days=1)
             
-            # Получаем данные из базы
+            # Get data from database
             users = self.db.session.query(User).filter(
                 User.created_at >= yesterday,
                 User.created_at < today
@@ -34,7 +34,7 @@ class Statistics:
                 Event.date < today
             ).all()
             
-            # Формируем статистику
+            # Form statistics
             stats = {
                 'date': yesterday.strftime('%Y-%m-%d'),
                 'new_users': len(users),
@@ -48,21 +48,21 @@ class Statistics:
             
             return stats
         except Exception as e:
-            self.logger.error(f"Ошибка при сборе ежедневной статистики: {e}")
+            self.logger.error(f"Error collecting daily statistics: {e}")
             return {}
 
     def collect_weekly_statistics(self) -> Dict:
         """
-        Сбор еженедельной статистики
+        Collect weekly statistics
         
         Returns:
-            Dict: Словарь со статистикой
+            Dict: Dictionary with statistics
         """
         try:
             today = datetime.utcnow().date()
             week_ago = today - timedelta(days=7)
             
-            # Получаем данные из базы
+            # Get data from database
             users = self.db.session.query(User).filter(
                 User.created_at >= week_ago,
                 User.created_at < today
@@ -78,7 +78,7 @@ class Statistics:
                 Consultation.date < today
             ).all()
             
-            # Формируем статистику
+            # Form statistics
             stats = {
                 'period': {
                     'start': week_ago.strftime('%Y-%m-%d'),
@@ -105,21 +105,21 @@ class Statistics:
             
             return stats
         except Exception as e:
-            self.logger.error(f"Ошибка при сборе еженедельной статистики: {e}")
+            self.logger.error(f"Error collecting weekly statistics: {e}")
             return {}
 
     def collect_monthly_statistics(self) -> Dict:
         """
-        Сбор ежемесячной статистики
+        Collect monthly statistics
         
         Returns:
-            Dict: Словарь со статистикой
+            Dict: Dictionary with statistics
         """
         try:
             today = datetime.utcnow().date()
             month_ago = today - timedelta(days=30)
             
-            # Получаем данные из базы
+            # Get data from database
             users = self.db.session.query(User).filter(
                 User.created_at >= month_ago,
                 User.created_at < today
@@ -135,7 +135,7 @@ class Statistics:
                 Consultation.date < today
             ).all()
             
-            # Формируем статистику
+            # Form statistics
             stats = {
                 'period': {
                     'start': month_ago.strftime('%Y-%m-%d'),
@@ -166,18 +166,18 @@ class Statistics:
             
             return stats
         except Exception as e:
-            self.logger.error(f"Ошибка при сборе ежемесячной статистики: {e}")
+            self.logger.error(f"Error collecting monthly statistics: {e}")
             return {}
 
     def export_statistics(self, period: str = 'daily') -> bool:
         """
-        Экспорт статистики в Excel
+        Export statistics to Excel
         
         Args:
-            period: Период статистики (daily, weekly, monthly)
+            period: Statistics period (daily, weekly, monthly)
             
         Returns:
-            bool: Успешность операции
+            bool: Operation success
         """
         try:
             if period == 'daily':
@@ -187,9 +187,9 @@ class Statistics:
             elif period == 'monthly':
                 stats = self.collect_monthly_statistics()
             else:
-                raise ValueError(f"Неизвестный период: {period}")
+                raise ValueError(f"Unknown period: {period}")
             
             return self.excel.export_statistics_to_excel(stats)
         except Exception as e:
-            self.logger.error(f"Ошибка при экспорте статистики: {e}")
+            self.logger.error(f"Error exporting statistics: {e}")
             return False 

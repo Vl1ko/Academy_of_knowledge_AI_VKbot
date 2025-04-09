@@ -11,27 +11,35 @@ class OpenAIHandler:
         self.temperature = AI_SETTINGS['temperature']
         self.max_tokens = AI_SETTINGS['max_tokens']
 
-    def detect_intent(self, message: str) -> str:
+    def detect_intent(self, message: str, context: str = "") -> str:
         """
-        Определение намерения пользователя с помощью OpenAI
+        Determine user intent with OpenAI
         
         Args:
-            message: Текст сообщения пользователя
+            message: User message text
+            context: Conversation context
             
         Returns:
-            str: Тип намерения (consultation, registration, information, unknown)
+            str: Intent type (consultation, registration, information, unknown)
         """
         try:
+            system_prompt = """You are a system for determining user intentions. 
+            Determine the type of request: consultation (request for consultation), 
+            registration (event registration), information (information request), 
+            unknown (unknown request)."""
+            
+            messages = [
+                {"role": "system", "content": system_prompt}
+            ]
+            
+            if context:
+                messages.append({"role": "system", "content": f"Conversation context:\n{context}"})
+            
+            messages.append({"role": "user", "content": message})
+            
             response = self.client.chat.completions.create(
                 model=self.model,
-                messages=[
-                    {"role": "system", "content": "Ты - система определения намерений пользователя. "
-                                                 "Определи тип запроса: consultation (запрос на консультацию), "
-                                                 "registration (запись на мероприятие), "
-                                                 "information (информационный запрос), "
-                                                 "unknown (неизвестный запрос)."},
-                    {"role": "user", "content": message}
-                ],
+                messages=messages,
                 temperature=0.3,
                 max_tokens=50
             )
@@ -40,31 +48,35 @@ class OpenAIHandler:
             return intent
             
         except Exception as e:
-            self.logger.error(f"Ошибка при определении намерения: {e}")
+            self.logger.error(f"Error detecting intent: {e}")
             return "unknown"
 
-    def generate_response(self, message: str, context: Optional[Dict] = None) -> str:
+    def generate_response(self, message: str, context: str = "", user_data: Optional[Dict] = None) -> str:
         """
-        Генерация ответа с помощью OpenAI
+        Generate response with OpenAI
         
         Args:
-            message: Текст сообщения пользователя
-            context: Контекст пользователя (опционально)
+            message: User message text
+            context: Conversation context
+            user_data: User data from database
             
         Returns:
-            str: Сгенерированный ответ
+            str: Generated response
         """
         try:
-            system_prompt = """Ты - помощник частной школы "Академия знаний" и частного сада "Академик".
-            Твоя задача - помогать родителям получать информацию о школе и садике, записываться на консультации и мероприятия.
-            Всегда будь вежлив, профессионально отвечай на вопросы.
-            В конце сообщения задавай уточняющий вопрос или предлагай следующий шаг."""
+            system_prompt = """You are an assistant for the private school "Academy of Knowledge" and private kindergarten "Academic".
+            Your task is to help parents get information about the school and kindergarten, schedule consultations and events.
+            Always be polite, professionally answer questions.
+            At the end of the message, ask a clarifying question or suggest the next step."""
             
             messages = [{"role": "system", "content": system_prompt}]
             
             if context:
-                context_prompt = f"Информация о пользователе: {context}"
-                messages.append({"role": "system", "content": context_prompt})
+                messages.append({"role": "system", "content": f"Conversation context:\n{context}"})
+            
+            if user_data:
+                user_info = f"User information: {user_data}"
+                messages.append({"role": "system", "content": user_info})
             
             messages.append({"role": "user", "content": message})
             
@@ -78,5 +90,5 @@ class OpenAIHandler:
             return response.choices[0].message.content.strip()
             
         except Exception as e:
-            self.logger.error(f"Ошибка при генерации ответа: {e}")
-            return "Извините, произошла ошибка при обработке вашего запроса. Пожалуйста, попробуйте позже." 
+            self.logger.error(f"Error generating response: {e}")
+            return "Sorry, an error occurred while processing your request. Please try again later." 
