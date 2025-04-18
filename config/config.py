@@ -8,6 +8,7 @@ load_dotenv()
 VK_TOKEN = os.getenv('VK_TOKEN')
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY')
+GIGACHAT_API_KEY = os.getenv('GIGACHAT_API_KEY')
 
 # Настройки базы данных
 DATABASE_URL = os.getenv('DATABASE_URL', 'sqlite:///academy_bot.db')
@@ -27,6 +28,7 @@ BOT_SETTINGS = {
 AI_SETTINGS = {
     'openai_model': 'gpt-4-turbo-preview',
     'deepseek_model': 'deepseek-chat',
+    'gigachat_model': 'GigaChat',
     'temperature': 0.7,
     'max_tokens': 1000
 }

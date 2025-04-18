@@ -9,6 +9,16 @@ from config.config import DATABASE_URL
 
 Base = declarative_base()
 
+class ChatHistory(Base):
+    __tablename__ = 'chat_history'
+    
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'))
+    message = Column(String)
+    role = Column(String)  # 'user' or 'bot'
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    user = relationship("User", back_populates="chat_history")
+
 class User(Base):
     __tablename__ = 'users'
     
@@ -63,7 +73,7 @@ class DatabaseHandler:
         self.logger = logging.getLogger(__name__)
 
     def get_user(self, vk_id: int) -> Optional[Dict]:
-        """Получение информации о пользователе"""
+        """Get user information"""
         try:
             user = self.session.query(User).filter_by(vk_id=vk_id).first()
             if user:
@@ -75,46 +85,46 @@ class DatabaseHandler:
                 }
             return None
         except Exception as e:
-            self.logger.error(f"Ошибка при получении пользователя: {e}")
+            self.logger.error(f"Error getting user: {e}")
             return None
 
     def create_user(self, vk_id: int, name: str, phone: str, child_age: int) -> bool:
-        """Создание нового пользователя"""
+        """Create new user"""
         try:
             user = User(vk_id=vk_id, name=name, phone=phone, child_age=child_age)
             self.session.add(user)
             self.session.commit()
             return True
         except Exception as e:
-            self.logger.error(f"Ошибка при создании пользователя: {e}")
+            self.logger.error(f"Error creating user: {e}")
             self.session.rollback()
             return False
 
     def schedule_consultation(self, user_id: int, date: datetime) -> bool:
-        """Запись на консультацию"""
+        """Schedule a consultation"""
         try:
             consultation = Consultation(user_id=user_id, date=date, status='scheduled')
             self.session.add(consultation)
             self.session.commit()
             return True
         except Exception as e:
-            self.logger.error(f"Ошибка при записи на консультацию: {e}")
+            self.logger.error(f"Error scheduling consultation: {e}")
             self.session.rollback()
             return False
 
     def check_event_availability(self, event_id: int) -> bool:
-        """Проверка наличия свободных мест на мероприятии"""
+        """Check event availability"""
         try:
             event = self.session.query(Event).filter_by(id=event_id).first()
             if event and event.current_participants < event.max_participants:
                 return True
             return False
         except Exception as e:
-            self.logger.error(f"Ошибка при проверке доступности мероприятия: {e}")
+            self.logger.error(f"Error checking event availability: {e}")
             return False
 
     def register_for_event(self, user_id: int, event_id: int) -> bool:
-        """Регистрация на мероприятие"""
+        """Register user for event"""
         try:
             event = self.session.query(Event).filter_by(id=event_id).first()
             if event and event.current_participants < event.max_participants:
@@ -129,12 +139,12 @@ class DatabaseHandler:
                 return True
             return False
         except Exception as e:
-            self.logger.error(f"Ошибка при регистрации на мероприятие: {e}")
+            self.logger.error(f"Error registering for event: {e}")
             self.session.rollback()
             return False
 
     def get_upcoming_events(self) -> List[Dict]:
-        """Получение списка предстоящих мероприятий"""
+        """Get list of upcoming events"""
         try:
             events = self.session.query(Event).filter(
                 Event.date > datetime.utcnow()
@@ -148,5 +158,39 @@ class DatabaseHandler:
                 'available_spots': event.max_participants - event.current_participants
             } for event in events]
         except Exception as e:
-            self.logger.error(f"Ошибка при получении списка мероприятий: {e}")
-            return [] 
+            self.logger.error(f"Error getting upcoming events: {e}")
+            return []
+
+    def get_user_data(self, vk_id: int) -> Optional[Dict]:
+        """Get user data for chatbot"""
+        try:
+            user = self.session.query(User).filter_by(vk_id=vk_id).first()
+            if user:
+                return {
+                    'id': user.id,
+                    'name': user.name,
+                    'phone': user.phone,
+                    'child_age': user.child_age
+                }
+            return None
+        except Exception as e:
+            self.logger.error(f"Error getting user data: {e}")
+            return None
+            
+    def update_user_intent(self, vk_id: int, intent: str, message: str) -> bool:
+        """Update user intent based on message"""
+        try:
+            user = self.session.query(User).filter_by(vk_id=vk_id).first()
+            if not user:
+                user = User(vk_id=vk_id)
+                self.session.add(user)
+                
+            if intent == "consultation":
+                pass
+            
+            self.session.commit()
+            return True
+        except Exception as e:
+            self.logger.error(f"Error updating user intent: {e}")
+            self.session.rollback()
+            return False 
