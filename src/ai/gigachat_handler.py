@@ -1,120 +1,364 @@
+import json
 import logging
 import os
 from typing import List, Dict, Any, Optional
 
-from gigachat import GigaChat
-from gigachat.models import Chat, Messages, MessagesRole
+try:
+    from gigachat import GigaChat as GigaChatSDK
+    from gigachat.models import Chat, Messages, MessagesRole
+    GIGACHAT_SDK_AVAILABLE = True
+except ImportError:
+    GIGACHAT_SDK_AVAILABLE = False
+    import requests
 
-from config.config import GIGACHAT_API_KEY, AI_SETTINGS
+from dotenv import load_dotenv
 
 
 class GigaChatHandler:
     """
-    Class for working with GigaChat API
+    Handler for GigaChat API
     """
     
     def __init__(self):
-        """Initialize GigaChat handler"""
+        """
+        Initialize the GigaChat handler
+        """
+        load_dotenv()
         self.logger = logging.getLogger(__name__)
+        self.api_key = os.getenv("GIGACHAT_API_KEY")
+        self.api_url = os.getenv("GIGACHAT_URL", "https://gigachat.devices.sberbank.ru/api/v1")
         
-        self.client = GigaChat(
-            credentials=GIGACHAT_API_KEY,
-            verify_ssl_certs=False
-        )
+        # Check if we have API key
+        if not self.api_key:
+            self.logger.warning("GIGACHAT_API_KEY not set in environment variables. GigaChat features will be limited.")
         
-        self.system_prompt = """Ты - полезный ассистент образовательного проекта "Академия Знаний".
-Твоя задача - помогать пользователям узнавать о курсах, отвечать на вопросы и регистрировать на занятия.
-Общайся вежливо, дружелюбно и информативно. Используй официально-деловой стиль, но будь достаточно дружелюбным.
-Ты должен называть себя "Ассистент Академии Знаний".
-"""
+        # Check if SDK is available
+        if not GIGACHAT_SDK_AVAILABLE:
+            self.logger.warning("GigaChat SDK not installed. Using fallback implementation.")
     
     def detect_intent(self, message: str) -> str:
         """
-        Detect user's intent from message
+        Detect user intent from message
         
         Args:
-            message: User's message
+            message: User message
             
         Returns:
-            String with detected intent
+            Intent category (greeting, question, registration, consultation, event, feedback, other)
         """
-        prompt = f"""Определи интент пользователя из следующего сообщения:
-"{message}"
-
-Возможные интенты:
-- registration: Пользователь хочет записаться на курс или занятие
-- consultation: Пользователь хочет получить консультацию по курсам
-- question: Пользователь задает общий вопрос о курсах
-- greeting: Пользователь здоровается или начинает разговор
-- other: Другой интент
-
-Верни только название интента без дополнительного текста.
-"""
+        # If GigaChat API is not available or SDK not installed, use simple rule-based detection
+        if not self.api_key or not GIGACHAT_SDK_AVAILABLE:
+            self.logger.warning("API key missing or SDK not available, using simple intent detection")
+            return self._simple_intent_detection(message)
         
         try:
-            chat_request = Chat(
-                messages=[
-                    Messages(role=MessagesRole.SYSTEM, content="Ты должен определить интент пользователя"),
-                    Messages(role=MessagesRole.USER, content=prompt)
-                ],
-                temperature=0.1
-            )
+            self.logger.info(f"Определение интента для сообщения: {message}")
+            prompt = f"""Определи категорию намерения пользователя на основе этого сообщения: "{message}"
+            Выбери одну из следующих категорий:
+            - greeting: приветствие, начало разговора
+            - question: вопрос о школе, детском саде, программах
+            - registration: запись в школу или детский сад
+            - consultation: запрос на консультацию
+            - event: вопрос о мероприятиях
+            - feedback: отзыв или жалоба
+            - other: другое
             
-            response = self.client.chat(chat_request)
+            Верни только название категории без дополнительных пояснений."""
             
-            intent = response.choices[0].message.content.strip().lower()
-            
-            for valid_intent in ["registration", "consultation", "question", "greeting", "other"]:
-                if valid_intent in intent:
-                    return valid_intent
-            
-            return "other"
+            with GigaChatSDK(
+                credentials=self.api_key,
+                base_url="https://gigachat.devices.sberbank.ru/api/v1",
+                scope="GIGACHAT_API_PERS",
+                verify_ssl_certs=False,
+                verbose=True
+            ) as giga:
+                chat = Chat(
+                    messages=[
+                        Messages(
+                            role=MessagesRole.SYSTEM,
+                            content="Ты - помощник для определения намерений пользователей."
+                        ),
+                        Messages(
+                            role=MessagesRole.USER,
+                            content=prompt
+                        )
+                    ],
+                    temperature=0.1,
+                    max_tokens=10
+                )
+                
+                self.logger.info("Отправка запроса в GigaChat API")
+                response = giga.chat(chat)
+                intent = response.choices[0].message.content.strip().lower()
+                self.logger.info(f"Получен ответ от GigaChat API: {intent}")
+                
+                # Validate that we got a valid intent
+                valid_intents = ["greeting", "question", "registration", "consultation", "event", "feedback", "other"]
+                if intent in valid_intents:
+                    return intent
+                else:
+                    self.logger.warning(f"Invalid intent from API: '{intent}', using fallback")
+                    return self._simple_intent_detection(message)
+                
         except Exception as e:
             self.logger.error(f"Error detecting intent: {e}")
-            return "other"
+            return self._simple_intent_detection(message)
     
-    def generate_response(self, message: str, message_history: List[Dict[str, str]], user_data: Optional[Dict[str, Any]] = None) -> str:
+    def _simple_intent_detection(self, message: str) -> str:
+        """
+        Simple rule-based intent detection
+        
+        Args:
+            message: User message
+            
+        Returns:
+            Intent category
+        """
+        message = message.lower()
+        
+        # Greeting detection
+        greeting_phrases = ["привет", "здравствуй", "добрый день", "доброе утро", "добрый вечер", "hello", "hi"]
+        if any(phrase in message for phrase in greeting_phrases) or len(message) < 10:
+            return "greeting"
+        
+        # Registration detection
+        registration_phrases = ["запис", "поступ", "зачисл", "прием", "принять", "подать заявл"]
+        if any(phrase in message for phrase in registration_phrases):
+            return "registration"
+        
+        # Consultation detection
+        consultation_phrases = ["консультац", "посовет", "встреч", "пообщат", "обсуд"]
+        if any(phrase in message for phrase in consultation_phrases):
+            return "consultation"
+        
+        # Event detection
+        event_phrases = ["мероприят", "событ", "праздник", "выступлен", "концерт", "собран"]
+        if any(phrase in message for phrase in event_phrases):
+            return "event"
+        
+        # Feedback detection
+        feedback_phrases = ["отзыв", "мнени", "впечатл", "жалоб", "претензи", "понравил", "не понравил"]
+        if any(phrase in message for phrase in feedback_phrases):
+            return "feedback"
+        
+        # Question detection (default for longer messages)
+        if "?" in message or len(message) > 20:
+            return "question"
+        
+        # Default intent
+        return "other"
+    
+    def generate_response(self, message: str, message_history: List[Dict[str, str]] = None, user_data: Dict[str, Any] = None) -> str:
         """
         Generate response to user message
         
         Args:
-            message: Current user message
-            message_history: Message history
-            user_data: User data (optional)
+            message: User message
+            message_history: Conversation history
+            user_data: User data
             
         Returns:
-            Response message
+            Generated response
         """
-        try:
-            context = ""
-            if user_data:
-                context = f"""
-Данные о пользователе:
-- Имя: {user_data.get('name', 'неизвестно')}
-- Email: {user_data.get('email', 'неизвестно')}
-- Телефон: {user_data.get('phone', 'неизвестно')}
-- Интересующие курсы: {user_data.get('interests', 'неизвестно')}
-"""
+        # Проверим специальные ключевые слова для прямого ответа
+        message_lower = message.lower()
+        
+        # Анализируем историю сообщений, чтобы не повторяться
+        context_from_history = ""
+        if message_history:
+            for msg in message_history[-5:]:  # Последние 5 сообщений
+                if msg.get("role") == "bot":
+                    context_from_history += msg.get("text", "") + " "
             
+            # Если пользователь запрашивает дополнительную информацию без конкретики
+            if any(phrase in message_lower for phrase in ["подробнее", "детальнее", "расскажи", "рассказать", "больше"]):
+                if "школ" in context_from_history.lower() and not any(school_word in message_lower for school_word in ["школа", "про школу", "о школе"]):
+                    return "Частная школа «Академия знаний» предлагает качественное образование для детей с 1 по 11 класс. Наши основные преимущества:\n\n• Маленькие классы до 15 человек, что позволяет уделить внимание каждому ребенку\n• Индивидуальный подход к обучению с учетом особенностей и интересов каждого ученика\n• Углубленное изучение английского языка с профессиональными педагогами\n• Современное техническое оснащение классов и лабораторий\n• Расширенная программа по основным предметам\n• Дополнительные занятия по робототехнике, программированию, искусству\n• Квалифицированные педагоги с большим опытом работы\n• Психологическое сопровождение учебного процесса\n• Сбалансированное 5-разовое питание\n• Комфортные и безопасные условия обучения\n\nХотите записаться на экскурсию по школе или пробное занятие, чтобы увидеть всё своими глазами?"
+                elif ("сад" in context_from_history.lower() or "садик" in context_from_history.lower()) and not any(sад_word in message_lower for sад_word in ["сад", "детский сад", "садик"]):
+                    return "Детский сад «Академик» - это комфортное и безопасное пространство для развития детей от 1.5 до 7 лет. Наша программа включает:\n\n• Развивающие занятия, адаптированные под возраст детей\n• Подготовку к школе для старших групп\n• Творческие мастерские (рисование, лепка, аппликация)\n• Музыкальные занятия и хореографию\n• Изучение английского языка в игровой форме\n• Спортивные мероприятия и активные игры\n• Индивидуальный подход к каждому ребенку\n• Пятиразовое сбалансированное питание с учетом индивидуальных потребностей\n• Просторные, светлые и уютные помещения\n• Собственную закрытую территорию для прогулок\n• Квалифицированных воспитателей с педагогическим образованием\n• Медицинское сопровождение\n\nХотите записаться на экскурсию, чтобы познакомиться с нашим садом и воспитателями?"
+                elif "програм" in context_from_history.lower() and not any(prog_word in message_lower for prog_word in ["программа", "программы", "обучение"]):
+                    return "В «Академии знаний» представлены следующие образовательные программы:\n\n• Начальная школа (1-4 классы): развитие базовых навыков чтения, письма, счета, логического мышления, творческого потенциала\n• Средняя школа (5-9 классы): углубленное изучение основных предметов, профориентация, развитие критического мышления\n• Старшая школа (10-11 классы): подготовка к ЕГЭ, профильное обучение по выбранным направлениям\n\nВсе ученики изучают основные предметы школьной программы:\n• Русский язык и литература\n• Математика, алгебра, геометрия\n• История и обществознание\n• География\n• Биология, химия, физика\n• Информатика\n• Английский язык (углубленное изучение)\n• Физическая культура\n• Технология и искусство\n\nДополнительные программы:\n• Робототехника и программирование\n• Математический клуб\n• Лингвистический центр (английский, немецкий, китайский языки)\n• Художественная студия\n• Музыкальная школа\n• Спортивные секции\n\nДля 5-классников у нас особое внимание уделяется адаптации при переходе в среднюю школу и развитию самостоятельности. Хотите записаться на консультацию?"
+        
+        # Прямые упоминания школы без других уточнений - дать конкретную информацию о школе
+        if message_lower in ["школа", "про школу", "о школе", "школьное", "школьник", "школьное образование"]:
+            return "Частная школа «Академия знаний» предлагает качественное образование для детей с 1 по 11 класс. У нас небольшие классы (до 15 человек), индивидуальный подход к каждому ученику, углубленное изучение английского языка, современная образовательная среда. Хотите узнать подробнее о программе обучения или записаться на экскурсию по школе?"
+        
+        # Прямые упоминания детского сада без других уточнений - дать конкретную информацию
+        if message_lower in ["сад", "детский сад", "садик", "про сад", "о садике", "дошкольное"]:
+            return "Детский сад «Академик» принимает детей от 1.5 до 7 лет. У нас создана уютная и безопасная среда для развития малышей, работают опытные воспитатели, проводятся развивающие занятия, подготовка к школе, творческие мастерские. Питание 5-разовое, учитываем индивидуальные особенности. Хотите узнать подробнее о программе или записаться на экскурсию?"
+        
+        # Если пользователь спрашивает о предметах
+        if any(subj_word in message_lower for subj_word in ["предмет", "уроки", "занятия"]):
+            return "В нашей школе представлены все основные предметы школьной программы: русский язык и литература, математика, история, география, биология, химия, физика, информатика, английский язык (углубленно), физкультура, технология и искусство. Также есть дополнительные занятия: робототехника, программирование, математический клуб, языковые курсы, художественная студия, музыка и спорт. Что именно вас интересует?"
+        
+        # Обработка запросов о возможностях бота
+        bot_abilities_phrases = ["что ты", "какие у тебя", "твои возможности", "что умеешь", "можешь делать", "кто ты", "расскажи о себе", "что ты можешь", "твои функции", "какие функции", "что делаешь"]
+        if any(phrase in message_lower for phrase in bot_abilities_phrases):
+            return "Могу рассказать о программах обучения в Академии знаний, помочь с записью на консультацию или мероприятие, предоставить информацию о школе и детском саде. Отвечу на вопросы о стоимости, расписании, педагогах, питании, дополнительных занятиях. Также помогу записаться на пробное занятие или экскурсию по школе и детскому саду. Какое направление обучения вас интересует?"
+        
+        # Стандартная обработка через API
+        if not self.api_key or not GIGACHAT_SDK_AVAILABLE:
+            self.logger.warning("API key missing or SDK not available, using fallback response")
+            return self._fallback_response(message)
+        
+        try:
+            # Prepare system prompt
+            system_prompt = """Ты - бот-помощник для частной школы и детского сада "Академия знаний". 
+            Твоя задача - отвечать на вопросы, помогать с записью в школу и детский сад, предоставлять информацию об образовательных программах.
+            
+            Важно:
+            1. Когда пользователь спрашивает о твоих возможностях, функциях или что ты умеешь делать (например: "Что ты можешь?", "Какие у тебя функции?", "Расскажи о себе"), 
+               НЕ ПРЕДСТАВЛЯЙСЯ и НЕ ГОВОРИ "Я бот-помощник". Вместо этого сразу рассказывай о том, как ты можешь помочь: 
+               "Могу рассказать о программах обучения в Академии знаний, помочь записаться на консультацию или мероприятие, 
+               предоставить информацию о школе и детском саде. Какое направление обучения вас интересует?"
+            
+            2. Когда пользователь упоминает "школу", то в ответе обязательно включи КОНКРЕТНУЮ информацию: "Частная школа «Академия знаний» предлагает образование для детей с 1 по 11 класс. У нас небольшие классы (до 15 человек), индивидуальный подход, углубленное изучение английского языка, современная образовательная среда."
+            
+            3. Когда пользователь упоминает "детский сад", то в ответе обязательно включи КОНКРЕТНУЮ информацию: "Детский сад «Академик» принимает детей от 1.5 до 7 лет. У нас создана уютная и безопасная среда, работают опытные воспитатели, проводятся развивающие занятия, подготовка к школе. Питание 5-разовое, учитываем индивидуальные особенности."
+            
+            4. Отвечай кратко и по существу. НИКОГДА НЕ ПОВТОРЯЙ предыдущие ответы.
+            
+            5. Будь вежливым и дружелюбным.
+            
+            6. НИКОГДА не предлагай "связаться с администратором" или "позвонить нам". Вместо этого всегда предлагай запись через бота: 
+               "Хотите записаться на консультацию для более подробного обсуждения?", "Могу помочь записаться на пробное занятие", 
+               "Для записи выберите пункт 'Записаться на консультацию' в меню".
+            
+            7. Не выдумывай информацию, которой у тебя нет.
+            
+            8. В конце ответа всегда задавай наводящий вопрос, который помогает пользователю двигаться к записи: 
+               "Хотите узнать больше о программе?", "Интересует запись на пробное занятие?", "Когда удобно прийти на консультацию?"
+               
+            9. ВАЖНО: Если видишь, что запрос пользователя очень короткий (1-2 слова) и содержит только упоминание "школы" или "детского сада", дай КОНКРЕТНЫЙ и ПОДРОБНЫЙ ответ о школе или садике соответственно. Не переспрашивай и не повторяй предыдущий ответ.
+            
+            10. ВАЖНО: Если пользователь говорит "да", "хорошо", "конечно" или другие слова согласия после твоего предложения рассказать подробнее о школе, садике или программах - ВСЕГДА давай развернутый ответ по теме, о которой шла речь до этого.
+            
+            11. Если пользователь указывает возраст или класс ребенка, ВСЕГДА учитывай эту информацию и давай ответ, адаптированный под этот возраст/класс.
+            
+            Обращайся к пользователю на "вы".
+            """
+            
+            # Add user data to system prompt if available
+            if user_data:
+                user_name = user_data.get("name", "")
+                if user_name:
+                    system_prompt += f"\nПользователя зовут: {user_name}."
+            
+            # Prepare messages
             messages = [
-                Messages(role=MessagesRole.SYSTEM, content=self.system_prompt + context)
+                Messages(
+                    role=MessagesRole.SYSTEM,
+                    content=system_prompt
+                )
             ]
             
-            for msg in message_history:
-                role = MessagesRole.USER if msg["role"] == "user" else MessagesRole.ASSISTANT
-                messages.append(Messages(role=role, content=msg["text"]))
+            # Add conversation history
+            if message_history:
+                for msg in message_history[-5:]:  # Last 5 messages
+                    role = MessagesRole.ASSISTANT if msg["role"] == "bot" else MessagesRole.USER
+                    messages.append(
+                        Messages(
+                            role=role,
+                            content=msg["text"]
+                        )
+                    )
             
+            # Add current message if not in history
             if not message_history or message_history[-1]["role"] != "user" or message_history[-1]["text"] != message:
-                messages.append(Messages(role=MessagesRole.USER, content=message))
+                messages.append(
+                    Messages(
+                        role=MessagesRole.USER,
+                        content=message
+                    )
+                )
             
-            chat_request = Chat(
-                messages=messages,
-                temperature=0.7
-            )
-            
-            response = self.client.chat(chat_request)
-            
-            return response.choices[0].message.content.strip()
+            self.logger.info(f"Генерация ответа на сообщение: {message}")
+            with GigaChatSDK(
+                credentials=self.api_key,
+                base_url="https://gigachat.devices.sberbank.ru/api/v1",
+                scope="GIGACHAT_API_PERS",
+                verify_ssl_certs=False,
+                verbose=True
+            ) as giga:
+                chat = Chat(
+                    messages=messages,
+                    temperature=0.7,
+                    max_tokens=800
+                )
+                response = giga.chat(chat)
+                ai_response = response.choices[0].message.content
+                self.logger.info(f"Получен ответ от GigaChat API: {ai_response[:50]}...")
+                return ai_response
+                
         except Exception as e:
             self.logger.error(f"Error generating response: {e}")
-            return "Извините, произошла ошибка при обработке вашего запроса. Пожалуйста, попробуйте еще раз позже." 
+            return self._fallback_response(message)
+    
+    def _fallback_response(self, message: str) -> str:
+        """
+        Fallback response when API is not available
+        
+        Args:
+            message: User message
+            
+        Returns:
+            Fallback response
+        """
+        message_lower = message.lower()
+        
+        # Обработка простого "да" или согласия - сразу переходим к сбору данных для записи
+        if message_lower in ["да", "хочу", "конечно", "согласен", "интересно", "записаться", "давай"]:
+            return "Отлично! Для записи на экскурсию или консультацию нам понадобится немного информации. Как вас зовут (ФИО)?"
+        
+        # Ответ на приветствие
+        greeting_phrases = ["привет", "здравствуй", "добрый день", "доброе утро", "добрый вечер", "hello", "hi"]
+        if any(phrase in message_lower for phrase in greeting_phrases) or len(message) < 10:
+            return "Здравствуйте! Рассматриваете варианты образования для вашего ребенка? Могу рассказать о наших программах."
+        
+        # Ответ на вопрос о возможностях бота
+        bot_abilities_phrases = ["что ты", "какие у тебя", "твои возможности", "что умеешь", "можешь делать", "кто ты", "расскажи о себе", "бот", "помощник", "как ты работаешь", "функции бота", "твои функции", "твоя задача", "как общаться", "как пользоваться"]
+        if any(phrase in message_lower for phrase in bot_abilities_phrases):
+            return "Я — виртуальный помощник Академии знаний. Вот что я умею:\n\n• Предоставляю информацию о школе и детском саде «Академик»\n• Рассказываю подробно о программах обучения для разных возрастов\n• Отвечаю на вопросы о стоимости, расписании, питании и т.д.\n• Помогаю записаться на экскурсию или пробное занятие\n• Организую консультацию с администрацией школы\n• Информирую о предстоящих мероприятиях и событиях\n\nЧто вас интересует в первую очередь? Хотите узнать про школу, детский сад или записаться на консультацию?"
+        
+        # Ответ на вопрос о школе
+        if "школ" in message_lower or "учеб" in message_lower or "образован" in message_lower:
+            if "подробн" in message_lower or "расскаж" in message_lower or "детальн" in message_lower:
+                return "Частная школа «Академия знаний» предлагает качественное образование для детей с 1 по 11 класс. Наши основные преимущества:\n\n• Маленькие классы до 15 человек, что позволяет уделить внимание каждому ребенку\n• Индивидуальный подход к обучению с учетом особенностей и интересов каждого ученика\n• Углубленное изучение английского языка с профессиональными педагогами\n• Современное техническое оснащение классов и лабораторий\n• Расширенная программа по основным предметам\n• Дополнительные занятия по робототехнике, программированию, искусству\n• Квалифицированные педагоги с большим опытом работы\n• Психологическое сопровождение учебного процесса\n• Сбалансированное 5-разовое питание\n• Комфортные и безопасные условия обучения\n\nХотите записаться на экскурсию по школе или пробное занятие, чтобы увидеть всё своими глазами?"
+            return "Частная школа «Академия знаний» - это современное образовательное учреждение, которое сочетает высокие стандарты образования с индивидуальным подходом к каждому ученику. У нас работают квалифицированные преподаватели, используются современные методики обучения. Хотите записаться на пробное занятие или консультацию для знакомства с нашей школой?"
+        
+        # Ответ на вопрос о детском саде
+        if "сад" in message_lower or "детск" in message_lower or "дошкольн" in message_lower:
+            if "подробн" in message_lower or "расскаж" in message_lower or "детальн" in message_lower:
+                return "Детский сад «Академик» - это комфортное и безопасное пространство для развития детей от 1.5 до 7 лет. Наша программа включает:\n\n• Развивающие занятия, адаптированные под возраст детей\n• Подготовку к школе для старших групп\n• Творческие мастерские (рисование, лепка, аппликация)\n• Музыкальные занятия и хореографию\n• Изучение английского языка в игровой форме\n• Спортивные мероприятия и активные игры\n• Индивидуальный подход к каждому ребенку\n• Пятиразовое сбалансированное питание с учетом индивидуальных потребностей\n• Просторные, светлые и уютные помещения\n• Собственную закрытую территорию для прогулок\n• Квалифицированных воспитателей с педагогическим образованием\n• Медицинское сопровождение\n\nХотите записаться на экскурсию, чтобы познакомиться с нашим садом и воспитателями?"
+            return "Частный детский сад «Академик» - это пространство для гармоничного развития детей, где созданы все условия для обучения, игры и творчества. Наш детский сад предлагает развивающие программы, заботливых воспитателей и безопасную среду. Хотите записаться на экскурсию, чтобы увидеть всё своими глазами?"
+        
+        # Вопрос о записи или регистрации
+        if "запис" in message_lower or "поступ" in message_lower or "регистр" in message_lower or "заявк" in message_lower:
+            return "Отлично! Для записи мне нужна небольшая информация. Как вас зовут (ФИО)?"
+        
+        # Вопрос о консультации
+        if "консультац" in message_lower or "встреч" in message_lower or "пообщат" in message_lower:
+            return "Для записи на консультацию мне понадобится немного информации. Как вас зовут (ФИО)?"
+        
+        # Вопрос о мероприятиях
+        if "мероприят" in message_lower or "событи" in message_lower or "праздник" in message_lower:
+            return "В нашей школе и детском саду регулярно проводятся различные мероприятия и праздники. Чтобы узнать о предстоящих событиях или записаться на них, могу предоставить актуальную информацию. Хотите узнать о ближайших мероприятиях?"
+        
+        # Вопрос о программах обучения
+        if "программ" in message_lower or "курс" in message_lower or "направлен" in message_lower:
+            if "подробн" in message_lower or "расскаж" in message_lower or "детальн" in message_lower:
+                return "В «Академии знаний» представлены следующие образовательные программы:\n\n• Начальная школа (1-4 классы): развитие базовых навыков чтения, письма, счета, логического мышления, творческого потенциала\n• Средняя школа (5-9 классы): углубленное изучение основных предметов, профориентация, развитие критического мышления\n• Старшая школа (10-11 классы): подготовка к ЕГЭ, профильное обучение по выбранным направлениям\n\nВсе ученики изучают основные предметы школьной программы:\n• Русский язык и литература\n• Математика, алгебра, геометрия\n• История и обществознание\n• География\n• Биология, химия, физика\n• Информатика\n• Английский язык (углубленное изучение)\n• Физическая культура\n• Технология и искусство\n\nДополнительные программы:\n• Робототехника и программирование\n• Математический клуб\n• Лингвистический центр (английский, немецкий, китайский языки)\n• Художественная студия\n• Музыкальная школа\n• Спортивные секции\n\nДля 5-классников у нас особое внимание уделяется адаптации при переходе в среднюю школу и развитию самостоятельности. Хотите записаться на консультацию?"
+            return "В 'Академии знаний' реализуются различные образовательные программы, включая основное образование, дополнительные курсы по предметам, творческие занятия и спортивные секции. Хотите узнать подробнее о конкретной программе или записаться на консультацию?"
+        
+        # Вопрос о стоимости
+        if "стоимост" in message_lower or "цен" in message_lower or "оплат" in message_lower:
+            if "подробн" in message_lower or "расскаж" in message_lower or "детальн" in message_lower:
+                return "Стоимость обучения в Академии знаний зависит от выбранной программы:\n\n• Начальная школа (1-4 классы): от 35 000 руб./месяц\n• Средняя школа (5-9 классы): от 38 000 руб./месяц\n• Старшая школа (10-11 классы): от 42 000 руб./месяц\n\nВ стоимость включено:\n• Обучение по основной программе\n• Питание (5-разовое)\n• Продленка до 19:00\n• Базовые дополнительные занятия\n\nДетский сад «Академик»:\n• Группа полного дня (7:30-19:30): от 33 000 руб./месяц\n• Группа неполного дня (до 15:00): от 27 000 руб./месяц\n\nТакже доступны скидки при записи двух и более детей из одной семьи. Хотите записаться на консультацию для обсуждения индивидуальных условий?"
+            return "Стоимость обучения зависит от выбранной программы и класса. Для получения актуальной информации о стоимости, пожалуйста, запишитесь на консультацию через соответствующий пункт меню."
+        
+        # Общий вопрос
+        if "?" in message:
+            return "Спасибо за ваш вопрос. Для получения более подробной информации, пожалуйста, запишитесь на консультацию или уточните, что именно вас интересует: школа, детский сад, программы обучения или мероприятия."
+        
+        # Общий ответ
+        return "Спасибо за ваше сообщение. Для получения информации о наших программах, записи на консультацию или регистрации на мероприятия, выберите соответствующий пункт в меню или сформулируйте ваш вопрос более конкретно." 

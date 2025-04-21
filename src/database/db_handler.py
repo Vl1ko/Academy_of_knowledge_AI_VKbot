@@ -28,6 +28,8 @@ class User(Base):
     phone = Column(String)
     child_age = Column(Integer)
     created_at = Column(DateTime, default=datetime.utcnow)
+    last_message = Column(String)
+    last_activity = Column(DateTime)
     consultations = relationship("Consultation", back_populates="user")
     event_registrations = relationship("EventRegistration", back_populates="user")
     chat_history = relationship("ChatHistory", back_populates="user")
@@ -192,5 +194,84 @@ class DatabaseHandler:
             return True
         except Exception as e:
             self.logger.error(f"Error updating user intent: {e}")
+            self.session.rollback()
+            return False
+
+    def add_user(self, vk_id: int) -> bool:
+        """Add new user without detailed information"""
+        try:
+            user = User(vk_id=vk_id)
+            self.session.add(user)
+            self.session.commit()
+            return True
+        except Exception as e:
+            self.logger.error(f"Error adding user: {e}")
+            self.session.rollback()
+            return False
+            
+    def update_user_last_message(self, vk_id: int, message: str) -> bool:
+        """Update user's last message and activity time"""
+        try:
+            user = self.session.query(User).filter_by(vk_id=vk_id).first()
+            if user:
+                user.last_message = message
+                user.last_activity = datetime.utcnow()
+                self.session.commit()
+                return True
+            return False
+        except Exception as e:
+            self.logger.error(f"Error updating user last message: {e}")
+            self.session.rollback()
+            return False
+            
+    def log_successful_kb_response(self, vk_id: int, query: str, response: str) -> bool:
+        """Log successful knowledge base response"""
+        try:
+            user = self.session.query(User).filter_by(vk_id=vk_id).first()
+            if user:
+                chat_history = ChatHistory(
+                    user_id=user.id,
+                    message=query,
+                    role='user'
+                )
+                self.session.add(chat_history)
+                
+                bot_response = ChatHistory(
+                    user_id=user.id,
+                    message=response,
+                    role='bot'
+                )
+                self.session.add(bot_response)
+                self.session.commit()
+                return True
+            return False
+        except Exception as e:
+            self.logger.error(f"Error logging KB response: {e}")
+            self.session.rollback()
+            return False
+            
+    def log_successful_ai_response(self, vk_id: int, query: str, response: str) -> bool:
+        """Log successful AI response"""
+        try:
+            user = self.session.query(User).filter_by(vk_id=vk_id).first()
+            if user:
+                chat_history = ChatHistory(
+                    user_id=user.id,
+                    message=query,
+                    role='user'
+                )
+                self.session.add(chat_history)
+                
+                bot_response = ChatHistory(
+                    user_id=user.id,
+                    message=response,
+                    role='bot'
+                )
+                self.session.add(bot_response)
+                self.session.commit()
+                return True
+            return False
+        except Exception as e:
+            self.logger.error(f"Error logging AI response: {e}")
             self.session.rollback()
             return False 
