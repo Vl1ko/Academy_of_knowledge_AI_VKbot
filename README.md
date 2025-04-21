@@ -41,6 +41,8 @@
 
 ## Установка и настройка
 
+### Обычная установка
+
 1. **Клонирование репозитория:**
    ```bash
    git clone https://github.com/yourusername/Academy_of_knowledge_AI_VKbot.git
@@ -79,6 +81,32 @@
    python main.py
    ```
 
+### Запуск с использованием Docker
+
+1. **Клонирование репозитория:**
+   ```bash
+   git clone https://github.com/yourusername/Academy_of_knowledge_AI_VKbot.git
+   cd Academy_of_knowledge_AI_VKbot
+   ```
+
+2. **Настройка переменных окружения:**  
+   Создайте файл `.env` в корне проекта как указано выше.
+
+3. **Сборка и запуск с помощью Docker Compose:**
+   ```bash
+   docker-compose up -d
+   ```
+
+4. **Просмотр логов:**
+   ```bash
+   docker-compose logs -f
+   ```
+
+5. **Остановка бота:**
+   ```bash
+   docker-compose down
+   ```
+
 ## Структура проекта
 
 ```
@@ -107,6 +135,8 @@ Academy_of_knowledge_AI_VKbot/
 ├── main.py                 # Основной файл запуска
 ├── .env                    # Переменные окружения
 ├── requirements.txt        # Зависимости
+├── Dockerfile              # Файл для сборки Docker-образа
+├── docker-compose.yml      # Конфигурация Docker Compose
 └── README.md               # Документация
 ```
 

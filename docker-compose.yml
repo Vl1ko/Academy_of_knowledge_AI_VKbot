@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  academy-vkbot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: academy-vkbot
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    env_file:
+      - .env
+    networks:
+      - academy-network
+
+networks:
+  academy-network:
+    driver: bridge 
