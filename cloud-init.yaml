@@ -1,0 +1,101 @@
+#cloud-config
+
+# Обновление пакетов и установка необходимых зависимостей
+package_update: true
+package_upgrade: true
+packages:
+  - apt-transport-https
+  - ca-certificates
+  - curl
+  - gnupg
+  - lsb-release
+  - git
+  - htop
+  - tmux
+
+# Установка Docker и Docker Compose
+runcmd:
+  # Установка Docker
+  - curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+  - echo "deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+  - apt-get update
+  - apt-get install -y docker-ce docker-ce-cli containerd.io
+  - systemctl enable docker
+  - systemctl start docker
+
+  # Установка Docker Compose
+  - mkdir -p /usr/local/lib/docker/cli-plugins
+  - curl -SL https://github.com/docker/compose/releases/download/v2.23.0/docker-compose-linux-x86_64 -o /usr/local/lib/docker/cli-plugins/docker-compose
+  - chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+  - ln -s /usr/local/lib/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose
+  
+  # Клонирование репозитория
+  - mkdir -p /opt/academy-bot
+  - git clone https://github.com/Vl1ko/Academy_of_knowledge_AI_VKbot.git /opt/academy-bot
+  
+  # Создание .env файла
+  - |
+    VK_TOKEN="vk1.a.kMsrMdg0dyn0oc77RquztA21wb4t2afJoGxYgMZtC6JF-UCS1JcE6lKcqYfDK5jYDvoZ-S0Egqr0W_ffNkO6JbEXaZ-BtgL7vHFoRAuWQDz-EpZaQqO-O9NRMGSeCr4_zMH02NhC8LMiFQ19Lg1opkcm74vpSX848Jcxkp-SOpY8R_tyinDq6_djyKZKmYDjZb8crRhqFbf5atD79ZoTrw"
+
+    VK_GROUP_ID=230057910
+    SCHOOL_GROUP_ID=230057910
+    KINDERGARTEN_GROUP_ID=230057910
+    ADMIN_IDS=405594165
+    GIGACHAT_API_KEY="ODNhN2ExNzUtNWZiZS00ODAzLTkxZjQtN2E5YTc0M2M3OTFhOmJmYzkwMDQwLWQyNTAtNDk4MS1hYjc3LTU5OGI3NDlkOWZiYw=="
+    GIGACHAT_URL='https://gigachat.devices.sberbank.ru/api/v1'
+
+    POSTGRES_USER=user
+    POSTGRES_DB=mydatabase
+    HOST_DB='127.0.0.1'
+    PORT_DB='5428'
+    POSTGRES_PASSWORD=12345678
+    PGDATA=/var/lib/postgresql/data/pgdata
+  
+  # Запуск приложения
+  - cd /opt/academy-bot && docker-compose up -d
+  
+  # Настройка автозапуска при перезагрузке
+  - systemctl enable docker.service
+  - |
+    cat > /etc/systemd/system/academy-bot.service << 'EOF'
+    [Unit]
+    Description=Academy Knowledge Bot
+    After=docker.service
+    Requires=docker.service
+
+    [Service]
+    Type=oneshot
+    RemainAfterExit=yes
+    WorkingDirectory=/opt/academy-bot
+    ExecStart=/usr/local/bin/docker-compose up -d
+    ExecStop=/usr/local/bin/docker-compose down
+    StandardOutput=journal
+
+    [Install]
+    WantedBy=multi-user.target
+    EOF
+  
+  - systemctl daemon-reload
+  - systemctl enable academy-bot.service
+  - systemctl start academy-bot.service
+
+# Создание пользователя для управления приложением
+users:
+  - name: botadmin
+    groups: docker
+    sudo: ['ALL=(ALL) NOPASSWD:ALL']
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDRvp9KGdGbHYwF53deigYdRajD4tIHjfopjAcX7hG9dGYiE9iwk2oMmhtLxZyEgNQu+O5dAy62GOWfpbhXMKJGLF1yKiJVqVu8DSVn9CVPd10Tyue9iQL3GXPYjKxS99ptEGh1+UT+PoKpkYEg+OLTRgNIV8ljvPOJDkQJFX6OnMIFQ+7tVRiPl3g2iH8WnZJ4Jd/QiMZM4DDQdCddb3DWJ0vPOJ/sWQ1BO1u4HvnFb2GG+sXbHD3BYrRtEcD4ggYrQCCwcMo5+YgZDNuKZVR17JNQFv5TjEtvLei+qKuXfI+qQSWmx3VUmYu0P6yx0iQ9kzChkk8Y1qOVk8C7 your_key_comment
+
+# Отключение смены пароля
+ssh_pwauth: false
+
+# Настройка времени
+timezone: Europe/Moscow
+
+# Настройка hostname
+hostname: academy-bot-server
+
+# Отправка уведомления об успешном завершении инициализации
+final_message: "Система готова к использованию. Приложение Academy Knowledge Bot запущено и доступно." 

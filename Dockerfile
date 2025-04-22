@@ -1,4 +1,4 @@
-FROM python:3.10-slim
+FROM cr.yandex/yc/python:3.10-slim
 
 WORKDIR /app
 
