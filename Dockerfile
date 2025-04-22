@@ -15,13 +15,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Установка Python и проверка версии
-RUN python --version && pip --version
+RUN python3 --version && pip3 --version
 
 # Копирование файлов зависимостей
 COPY requirements.txt .
 
 # Установка зависимостей Python
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip3 install --no-cache-dir -r requirements.txt
 
 # Копирование всего приложения
 COPY . .
@@ -30,7 +30,7 @@ COPY . .
 RUN mkdir -p data/knowledge_base/docs data/reports logs
 
 # Опционально: инициализация базы данных и знаний
-RUN python setup.py
+RUN python3 setup.py
 
 # Запуск приложения
-CMD ["python", "main.py"] 
+CMD ["python3", "main.py"] 
