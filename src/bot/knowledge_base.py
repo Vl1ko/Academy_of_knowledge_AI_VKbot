@@ -3,6 +3,7 @@ import os
 import re
 from difflib import SequenceMatcher
 from typing import Dict, Any, List, Tuple, Optional
+from pathlib import Path
 
 
 class KnowledgeBase:

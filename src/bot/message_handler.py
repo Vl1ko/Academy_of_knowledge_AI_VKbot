@@ -43,7 +43,8 @@ class MessageHandler:
         Returns:
             Dictionary with response text and keyboard
         """
-        self.logger.info(f"Обработка сообщения: '{message_text}'. Payload: {payload}")
+        self.logger.info(f"Processing message from user {user_id}: {message_text}")
+        
         # Добавляем запись пользователя в БД, если его ещё нет
         if not self.db.get_user(user_id):
             self.logger.info(f"Новый пользователь {user_id} добавлен в базу данных")
@@ -52,325 +53,53 @@ class MessageHandler:
         # Обновляем последнее сообщение пользователя и время активности
         self.db.update_user_last_message(user_id, message_text)
         
-        # Получаем контекст диалога с пользователем
+        # Добавляем сообщение пользователя в историю
+        self.logger.info(f"Adding user message to history: {message_text}")
+        self.conversation_manager.add_message(user_id, "user", message_text)
+        
+        # Получаем состояние диалога
         conversation_state = self.conversation_manager.get_conversation_state(user_id)
-        self.logger.debug(f"Состояние диалога для пользователя {user_id}: {conversation_state}")
         
-        # Получаем последние сообщения пользователя для определения контекста
-        last_messages = self.conversation_manager.get_messages(user_id, limit=5)
-        last_context = self._extract_context_from_messages(last_messages)
-        
-        # Проверяем, нет ли повторяющихся ответов "да"
-        message_lower = message_text.lower().strip()
-        
-        # Получаем последние два сообщения бота для проверки повторов
-        bot_messages = [msg for msg in last_messages if msg.get("role") == "bot"]
-        if len(bot_messages) >= 2 and message_lower in ["да", "хочу", "конечно", "давай"]:
-            last_bot_message = bot_messages[-1].get("text", "")
-            prev_bot_message = bot_messages[-2].get("text", "") if len(bot_messages) > 1 else ""
-            
-            # Если последние два сообщения бота идентичны, значит мы повторяемся
-            if last_bot_message.strip() == prev_bot_message.strip():
-                # Переходим к следующему шагу вместо повтора
-                if "записаться на экскурсию" in last_bot_message or "записаться на консультацию" in last_bot_message:
-                    response = "Отлично! Для записи на экскурсию или консультацию нам понадобится немного информации. Как вас зовут (ФИО)?"
-                    self.conversation_manager.update_stage(user_id, "consultation_name")
-                    self.conversation_manager.add_message(user_id, "user", message_text)
-                    self.conversation_manager.add_message(user_id, "bot", response)
-                    return {
-                        'text': response,
-                        'keyboard': self.keyboard_generator.generate_back_button()
-                    }
-                elif "узнать подробнее" in last_bot_message:
-                    # Даем информацию о конкретных предметах, если ранее спрашивали о программе
-                    if "программ" in last_bot_message or "образовательн" in last_bot_message:
-                        response = "Давайте расскажу подробнее о нашем подходе к обучению. Для пятиклассников мы предлагаем:\n\n• Углубленное изучение математики с российскими и международными методиками\n• Интенсивный курс английского языка (6 часов в неделю)\n• Дополнительные часы по русскому языку и литературе\n• Проектную деятельность для развития исследовательских навыков\n• Профессиональную психологическую поддержку при адаптации к средней школе\n• Внеурочную активность по выбору (спорт, творчество, программирование)\n\nУ каждого ученика есть собственный тьютор, который помогает в организации учебного процесса. Хотите узнать о каком-то предмете подробнее?"
-                        self.conversation_manager.add_message(user_id, "user", message_text)
-                        self.conversation_manager.add_message(user_id, "bot", response)
-                        return {
-                            'text': response,
-                            'keyboard': self.keyboard_generator.generate_main_menu()
-                        }
-        
-        # Проверяем, если пользователь согласился на предложение записаться на экскурсию
-        if message_lower in ["да", "хочу", "конечно", "давай", "запишите", "запишусь", "хочу записаться", "записаться", "запись", "да, давайте"]:
-            # Проверяем, не находится ли пользователь уже в процессе сбора данных для консультации
-            current_stage = self.conversation_manager.get_stage(user_id)
-            if current_stage in ["consultation_name", "consultation_child_info", "consultation_wishes"]:
-                # Пользователь уже в процессе записи на консультацию, продолжаем текущий процесс
-                # В этом случае вернем текущее сообщение для соответствующего этапа
-                return self._handle_conversation_stage(user_id, message_text, current_stage)
-                
-            # Проверяем, есть ли у нас уже данные о пользователе в базе
-            user_data = self.db.get_user_data(user_id) or self.excel_handler.get_user(user_id)
-            
-            # Если у нас уже есть данные о пользователе, устанавливаем имя и переходим к следующему шагу
-            if user_data and user_data.get('name'):
-                # Устанавливаем сохраненные данные в conversation_manager
-                self.conversation_manager.add_data(user_id, "name", user_data['name'])
-                
-                # Сразу переходим к запросу информации о ребенке
-                self.conversation_manager.update_stage(user_id, "consultation_child_info")
-                response = f"Отлично, {user_data['name']}! Укажите, пожалуйста, возраст и класс ребенка:"
-                
-                self.conversation_manager.add_message(user_id, "user", message_text)
-                self.conversation_manager.add_message(user_id, "bot", response)
+        # Проверяем, не отключен ли ИИ для этого пользователя
+        if self.conversation_manager.is_ai_disabled(user_id):
+            # Проверяем, не является ли сообщение командой от администратора
+            if message_text == "Перевожу Вас на нашего ассистента" and self._is_admin(user_id):
+                self.conversation_manager.enable_ai(user_id)
                 return {
-                    'text': response,
-                    'keyboard': self.keyboard_generator.generate_back_button()
-                }
-            
-            # Сначала проверяем, не было ли предложения записаться в предыдущих сообщениях бота
-            for msg in reversed(bot_messages):
-                bot_message = msg.get("text", "").lower()
-                # Если предыдущее сообщение бота содержало приглашение на экскурсию
-                if any(word in bot_message for word in ["экскурсию", "пробное занятие", "консультацию", "запись", "записаться"]):
-                    response = "Отлично! Для записи нам понадобится немного информации. Как вас зовут (ФИО)?"
-                    self.conversation_manager.update_stage(user_id, "consultation_name")
-                    self.conversation_manager.add_message(user_id, "user", message_text)
-                    self.conversation_manager.add_message(user_id, "bot", response)
-                    return {
-                        'text': response,
-                        'keyboard': self.keyboard_generator.generate_back_button()
-                    }
-            
-            # Если нет контекста, но пользователь хочет записаться
-            response = "Хорошо! Для записи на консультацию или экскурсию нам понадобится немного информации. Как вас зовут (ФИО)?"
-            self.conversation_manager.update_stage(user_id, "consultation_name")
-            self.conversation_manager.add_message(user_id, "user", message_text)
-            self.conversation_manager.add_message(user_id, "bot", response)
-            return {
-                'text': response,
-                'keyboard': self.keyboard_generator.generate_back_button()
-            }
-        
-        # Прямые запросы на запись или консультацию
-        if any(record_word in message_lower for record_word in ["запись", "консультация", "консультацию", "записаться", "экскурсия", "экскурсию", "пробное занятие", "запишите меня"]):
-            response = "Отлично! Для записи нам понадобится немного информации. Как вас зовут (ФИО)?"
-            self.conversation_manager.update_stage(user_id, "consultation_name")
-            self.conversation_manager.add_message(user_id, "user", message_text)
-            self.conversation_manager.add_message(user_id, "bot", response)
-            return {
-                'text': response,
-                'keyboard': self.keyboard_generator.generate_back_button()
-            }
-        
-        # Обрабатываем payload, если он есть
-        if payload:
-            try:
-                payload_dict = json.loads(payload)
-                self.logger.info(f"Обработка payload: {payload_dict}")
-                
-                if 'action' in payload_dict:
-                    action = payload_dict['action']
-                    
-                    # Обрабатываем различные действия из payload
-                    if action == 'add_faq':
-                        return self._handle_add_faq_action(user_id)
-                    
-                    elif action == 'add_knowledge':
-                        return self._handle_add_knowledge_action(user_id)
-                    
-                    elif action == 'start_excel_upload':
-                        return self._handle_excel_upload_action(user_id)
-                    
-                    elif action == 'cancel':
-                        return self._handle_cancel_action(user_id)
-                    
-                    elif action == 'show_faq':
-                        return self._handle_show_faq_action()
-                
-            except json.JSONDecodeError:
-                self.logger.error(f"Неверный формат payload: {payload}")
-        
-        # Проверяем, находится ли пользователь в процессе добавления FAQ
-        if conversation_state.get('state') == 'adding_faq_question':
-            self.logger.info(f"Пользователь {user_id} добавляет вопрос FAQ")
-            return self._handle_faq_question_input(user_id, message_text)
-        
-        elif conversation_state.get('state') == 'adding_faq_answer':
-            self.logger.info(f"Пользователь {user_id} добавляет ответ FAQ")
-            return self._handle_faq_answer_input(user_id, message_text)
-        
-        # Проверяем, находится ли пользователь в процессе добавления знаний
-        elif conversation_state.get('state') == 'adding_knowledge_question':
-            self.logger.info(f"Пользователь {user_id} добавляет вопрос в базу знаний")
-            return self._handle_knowledge_question_input(user_id, message_text)
-        
-        elif conversation_state.get('state') == 'adding_knowledge_answer':
-            self.logger.info(f"Пользователь {user_id} добавляет ответ в базу знаний")
-            return self._handle_knowledge_answer_input(user_id, message_text)
-        
-        # Проверяем, находится ли пользователь в процессе загрузки Excel
-        elif conversation_state.get('state') == 'uploading_excel':
-            self.logger.info(f"Пользователь {user_id} загружает Excel файл")
-            return self._handle_excel_file_upload(user_id, message_text)
-        
-        # Специальная обработка коротких запросов о школе или детском саде
-        message_lower = message_text.lower().strip()
-        
-        # Проверяем на запрос подробной информации
-        is_detailed_request = any(detail_word in message_lower for detail_word in 
-                                ["подробн", "детальн", "расскаж", "подробнее", "детальнее", "расскажи", "больше", "подробности"])
-        
-        # Обработка простого согласия "да", "хочу", "конечно" в контексте предыдущего сообщения о школе/садике
-        simple_agreement = message_lower in ["да", "хочу", "конечно", "интересно", "интересует", "узнать", "хотим", "давай"]
-        if simple_agreement and last_context:
-            # Если в последнем сообщении бота содержится фраза "хотите записаться"
-            if len(bot_messages) > 0:
-                last_bot_msg = bot_messages[-1].get("text", "").lower()
-                if "хотите записаться" in last_bot_msg or "запись" in last_bot_msg or "записаться" in last_bot_msg:
-                    response = "Отлично! Для записи на экскурсию или консультацию нам понадобится немного информации. Как вас зовут (ФИО)?"
-                    self.conversation_manager.update_stage(user_id, "consultation_name")
-                    self.conversation_manager.add_message(user_id, "user", message_text)
-                    self.conversation_manager.add_message(user_id, "bot", response)
-                    return {
-                        'text': response,
-                        'keyboard': self.keyboard_generator.generate_back_button()
-                    }
-                
-            if "школа" in last_context:
-                is_detailed_request = True
-                message_lower = "о школе подробнее"
-            elif "сад" in last_context or "садик" in last_context:
-                is_detailed_request = True
-                message_lower = "о садике подробнее"
-            elif "программ" in last_context:
-                is_detailed_request = True
-                message_lower = "о программах подробнее"
-            elif "стоимост" in last_context or "цен" in last_context:
-                is_detailed_request = True
-                message_lower = "о стоимости подробнее"
-        
-        # Обработка прямого запроса "расскажи подробнее" без указания темы
-        if is_detailed_request and not any(topic in message_lower for topic in ["школ", "сад", "программ", "стоимост", "цен"]):
-            if "школа" in last_context:
-                message_lower = "о школе подробнее"
-            elif "сад" in last_context or "садик" in last_context:
-                message_lower = "о садике подробнее"
-            elif "программ" in last_context:
-                message_lower = "о программах подробнее"
-            elif "стоимост" in last_context or "цен" in last_context:
-                message_lower = "о стоимости подробнее"
-        
-        # Запросы о школе
-        if any(school_word in message_lower for school_word in ["школа", "про школу", "о школе", "школьное", "школьник", "школьное образование"]):
-            if is_detailed_request:
-                response = "Частная школа «Академия знаний» предлагает качественное образование для детей с 1 по 11 класс. Наши основные преимущества:\n\n• Маленькие классы до 15 человек, что позволяет уделить внимание каждому ребенку\n• Индивидуальный подход к обучению с учетом особенностей и интересов каждого ученика\n• Углубленное изучение английского языка с профессиональными педагогами\n• Современное техническое оснащение классов и лабораторий\n• Расширенная программа по основным предметам\n• Дополнительные занятия по робототехнике, программированию, искусству\n• Квалифицированные педагоги с большим опытом работы\n• Психологическое сопровождение учебного процесса\n• Сбалансированное 5-разовое питание\n• Комфортные и безопасные условия обучения\n\nХотите записаться на экскурсию по школе или пробное занятие, чтобы увидеть всё своими глазами?"
-            else:
-                response = "Частная школа «Академия знаний» предлагает качественное образование для детей с 1 по 11 класс. У нас небольшие классы (до 15 человек), индивидуальный подход к каждому ученику, углубленное изучение английского языка, современная образовательная среда. Хотите узнать подробнее о программе обучения или записаться на экскурсию по школе?"
-            
-            self.db.log_successful_kb_response(user_id, message_text, response)
-            self.conversation_manager.add_message(user_id, "user", message_text)
-            self.conversation_manager.add_message(user_id, "bot", response)
-            return {
-                'text': response,
-                'keyboard': self.keyboard_generator.generate_main_menu()
-            }
-        
-        # Запросы о детском саде    
-        if any(kindergarten_word in message_lower for kindergarten_word in ["сад", "детский сад", "садик", "про сад", "о садике", "дошкольное"]):
-            if is_detailed_request:
-                response = "Детский сад «Академик» - это комфортное и безопасное пространство для развития детей от 1.5 до 7 лет. Наша программа включает:\n\n• Развивающие занятия, адаптированные под возраст детей\n• Подготовку к школе для старших групп\n• Творческие мастерские (рисование, лепка, аппликация)\n• Музыкальные занятия и хореографию\n• Изучение английского языка в игровой форме\n• Спортивные мероприятия и активные игры\n• Индивидуальный подход к каждому ребенку\n• Пятиразовое сбалансированное питание с учетом индивидуальных потребностей\n• Просторные, светлые и уютные помещения\n• Собственную закрытую территорию для прогулок\n• Квалифицированных воспитателей с педагогическим образованием\n• Медицинское сопровождение\n\nХотите записаться на экскурсию, чтобы познакомиться с нашим садом и воспитателями?"
-            else:
-                response = "Детский сад «Академик» принимает детей от 1.5 до 7 лет. У нас создана уютная и безопасная среда для развития малышей, работают опытные воспитатели, проводятся развивающие занятия, подготовка к школе, творческие мастерские. Питание 5-разовое, учитываем индивидуальные особенности. Хотите узнать подробнее о программе или записаться на экскурсию?"
-            
-            self.db.log_successful_kb_response(user_id, message_text, response)
-            self.conversation_manager.add_message(user_id, "user", message_text)
-            self.conversation_manager.add_message(user_id, "bot", response)
-            return {
-                'text': response,
-                'keyboard': self.keyboard_generator.generate_main_menu()
-            }
-        
-        # Запросы о программах обучения
-        if any(program_word in message_lower for program_word in ["программ", "курс", "направлен", "занятия", "уроки", "предмет"]):
-            if is_detailed_request:
-                response = "В «Академии знаний» представлены следующие образовательные программы:\n\n• Начальная школа (1-4 классы): развитие базовых навыков чтения, письма, счета, логического мышления, творческого потенциала\n• Средняя школа (5-9 классы): углубленное изучение основных предметов, профориентация, развитие критического мышления\n• Старшая школа (10-11 классы): подготовка к ЕГЭ, профильное обучение по выбранным направлениям\n\nВсе ученики изучают основные предметы школьной программы:\n• Русский язык и литература\n• Математика, алгебра, геометрия\n• История и обществознание\n• География\n• Биология, химия, физика\n• Информатика\n• Английский язык (углубленное изучение)\n• Физическая культура\n• Технология и искусство\n\nДополнительные программы:\n• Робототехника и программирование\n• Математический клуб\n• Лингвистический центр (английский, немецкий, китайский языки)\n• Художественная студия\n• Музыкальная школа\n• Спортивные секции\n\nДля 5-классников у нас особое внимание уделяется адаптации при переходе в среднюю школу и развитию самостоятельности. Хотите записаться на индивидуальную консультацию с завучем для обсуждения программы 5 класса?"
-            else:
-                response = "В нашей школе представлены все основные предметы школьной программы: русский язык и литература, математика, история, география, биология, химия, физика, информатика, английский язык (углубленно), физкультура, технология и искусство. Также есть дополнительные занятия: робототехника, программирование, математический клуб, языковые курсы, художественная студия, музыка и спорт. Хотите узнать подробнее о программе для конкретного класса?"
-            
-            self.db.log_successful_kb_response(user_id, message_text, response)
-            self.conversation_manager.add_message(user_id, "user", message_text)
-            self.conversation_manager.add_message(user_id, "bot", response)
-            return {
-                'text': response,
-                'keyboard': self.keyboard_generator.generate_main_menu()
-            }
-        
-        # Запросы о стоимости
-        if any(cost_word in message_lower for cost_word in ["стоимост", "цен", "оплат", "сколько стоит", "платить"]):
-            if is_detailed_request:
-                response = "Стоимость обучения в Академии знаний зависит от выбранной программы:\n\n• Начальная школа (1-4 классы): от 35 000 руб./месяц\n• Средняя школа (5-9 классы): от 38 000 руб./месяц\n• Старшая школа (10-11 классы): от 42 000 руб./месяц\n\nВ стоимость включено:\n• Обучение по основной программе\n• Питание (5-разовое)\n• Продленка до 19:00\n• Базовые дополнительные занятия\n\nДетский сад «Академик»:\n• Группа полного дня (7:30-19:30): от 33 000 руб./месяц\n• Группа неполного дня (до 15:00): от 27 000 руб./месяц\n\nТакже доступны скидки при записи двух и более детей из одной семьи. Хотите записаться на консультацию для обсуждения индивидуальных условий?"
-                self.db.log_successful_kb_response(user_id, message_text, response)
-                self.conversation_manager.add_message(user_id, "user", message_text)
-                self.conversation_manager.add_message(user_id, "bot", response)
-                return {
-                    'text': response,
+                    'text': "Я снова на связи! Чем могу помочь?",
                     'keyboard': self.keyboard_generator.generate_main_menu()
                 }
+            # Не отправляем никаких сообщений, пока пользователь не нажмет "Завершить диалог"
+            return None
         
-        # Проверяем на приветствие
-        if self._is_greeting(message_text):
-            self.logger.info(f"Обнаружено приветствие от пользователя {user_id}")
-            response = self._generate_greeting_response()
-            self.conversation_manager.add_message(user_id, "user", message_text)
-            self.conversation_manager.add_message(user_id, "bot", response)
-            return {
-                'text': response,
-                'keyboard': self.keyboard_generator.generate_main_menu()
-            }
+        # Проверяем, находится ли пользователь в процессе заполнения формы
+        if conversation_state.get('state') == 'consultation_form':
+            return self._handle_consultation_form(user_id, message_text, conversation_state)
         
-        # Определяем интент сообщения
-        self.logger.info(f"Определение интента для сообщения: '{message_text}'")
-        intent = self.ai_handler.detect_intent(message_text)
-        self.logger.info(f"Определен интент: {intent}")
+        # Проверяем запрос на консультацию
+        if self._is_consultation_request(message_text):
+            return self._start_consultation_form(user_id)
         
-        # Специальная обработка запросов о возможностях бота
-        message_lower = message_text.lower()
-        bot_abilities_phrases = ["что ты", "какие у тебя", "твои возможности", "что умеешь", "можешь делать", 
-                               "кто ты", "расскажи о себе", "что ты можешь", "твои функции", "какие функции", 
-                               "что делаешь", "помоги", "помочь", "как общаться", "твоя задача", "твое назначение"]
+        # Проверяем запрос на помощь администратора
+        if self._is_admin_help_request(message_text):
+            return self._handle_admin_help_request(user_id, message_text)
         
-        if any(phrase in message_lower for phrase in bot_abilities_phrases):
-            self.logger.info(f"Определен запрос о возможностях бота")
-            response = "Могу рассказать о программах обучения в Академии знаний, помочь с записью на консультацию или мероприятие, предоставить информацию о школе и детском саде. Отвечу на вопросы о стоимости, расписании, педагогах, питании, дополнительных занятиях. Также помогу записаться на пробное занятие или экскурсию по школе и детскому саду. Какое направление обучения вас интересует?"
-            
-            self.db.log_successful_kb_response(user_id, message_text, response)
-            self.conversation_manager.add_message(user_id, "user", message_text)
-            self.conversation_manager.add_message(user_id, "bot", response)
-            
-            return {
-                'text': response,
-                'keyboard': self.keyboard_generator.generate_main_menu()
-            }
-        
-        # Проверяем базу знаний на наличие ответа
-        self.logger.info(f"Поиск ответа в базе знаний для: '{message_text}'")
-        kb_response = self.knowledge_base.get_response(message_text, min_ratio=0.65)
-        
-        if kb_response:
-            self.logger.info(f"Найден ответ в базе знаний")
-            # Записываем успешный ответ из базы знаний
-            self.db.log_successful_kb_response(user_id, message_text, kb_response)
-            self.conversation_manager.add_message(user_id, "user", message_text)
-            self.conversation_manager.add_message(user_id, "bot", kb_response)
-            
-            # Возвращаем ответ с клавиатурой
-            return {
-                'text': kb_response,
-                'keyboard': self.keyboard_generator.generate_main_menu()
-            }
-        
-        # Если ответ не найден в базе знаний, генерируем ответ с помощью ИИ
-        self.logger.info(f"Ответ не найден в БЗ, генерация ответа с помощью ИИ")
+        # Всегда используем GigaChat для генерации ответов
         try:
-            ai_response = self.ai_handler.generate_response(message_text, self.conversation_manager.get_message_history(user_id))
+            # Получаем историю сообщений
+            message_history = self.conversation_manager.get_message_history(user_id)
+            self.logger.info(f"Retrieved message history for GigaChat: {message_history}")
             
-            # Записываем успешный ответ от ИИ
-            self.db.log_successful_ai_response(user_id, message_text, ai_response)
-            self.conversation_manager.add_message(user_id, "user", message_text)
+            # Генерируем ответ с помощью GigaChat
+            ai_response = self.ai_handler.generate_response(message_text, message_history)
+            self.logger.info(f"Generated AI response: {ai_response}")
+            
+            # Добавляем сообщение бота в историю
+            self.logger.info(f"Adding bot response to history: {ai_response}")
             self.conversation_manager.add_message(user_id, "bot", ai_response)
+            
+            # Логируем успешный ответ
+            self.db.log_successful_ai_response(user_id, message_text, ai_response)
             
             return {
                 'text': ai_response,
@@ -379,9 +108,151 @@ class MessageHandler:
         except Exception as e:
             self.logger.error(f"Ошибка при генерации ответа ИИ: {e}")
             return {
-                'text': "Извините, у меня возникла проблема с генерацией ответа. Пожалуйста, попробуйте задать вопрос по-другому или немного позже.",
+                'text': "Извините, произошла ошибка. Пожалуйста, попробуйте позже или обратитесь к администратору.",
                 'keyboard': self.keyboard_generator.generate_main_menu()
             }
+    
+    def _is_consultation_request(self, message: str) -> bool:
+        """Check if message is a consultation request"""
+        message = message.lower()
+        consultation_phrases = [
+            "консультац", "записаться", "запись", "встреч", "обсуд",
+            "хочу узнать", "хочу поговорить", "нужна помощь", "нужна консультация"
+        ]
+        return any(phrase in message for phrase in consultation_phrases)
+    
+    def _start_consultation_form(self, user_id: int) -> Dict[str, Any]:
+        """Start consultation form flow"""
+        self.conversation_manager.update_state(user_id, {
+            'state': 'consultation_form',
+            'stage': 'name'
+        })
+        
+        response = "Для записи на консультацию мне нужно собрать немного информации. Как вас зовут (ФИО)?"
+        self.conversation_manager.add_message(user_id, "bot", response)
+        
+        return {
+            'text': response,
+            'keyboard': self.keyboard_generator.generate_cancel_button()
+        }
+    
+    def _handle_consultation_form(self, user_id: int, message: str, state: Dict) -> Dict[str, Any]:
+        """Handle consultation form input"""
+        stage = state.get('stage')
+        
+        if message.lower() in ['отмена', 'cancel', 'назад', 'back']:
+            self.conversation_manager.reset_state(user_id)
+            return {
+                'text': "Заполнение формы отменено. Чем еще могу помочь?",
+                'keyboard': self.keyboard_generator.generate_main_menu()
+            }
+        
+        if stage == 'name':
+            # Validate name (simple check for now)
+            if len(message.split()) < 2:
+                return {
+                    'text': "Пожалуйста, укажите полное ФИО (фамилию и имя).",
+                    'keyboard': self.keyboard_generator.generate_cancel_button()
+                }
+            
+            self.conversation_manager.update_state(user_id, {
+                'state': 'consultation_form',
+                'stage': 'phone',
+                'data': {'name': message}
+            })
+            
+            response = "Спасибо! Теперь, пожалуйста, укажите ваш контактный телефон:"
+            self.conversation_manager.add_message(user_id, "bot", response)
+            
+            return {
+                'text': response,
+                'keyboard': self.keyboard_generator.generate_cancel_button()
+            }
+            
+        elif stage == 'phone':
+            # Validate phone number (simple check for now)
+            phone = ''.join(filter(str.isdigit, message))
+            if len(phone) < 10:
+                return {
+                    'text': "Пожалуйста, укажите корректный номер телефона.",
+                    'keyboard': self.keyboard_generator.generate_cancel_button()
+                }
+            
+            # Save consultation request
+            name = state.get('data', {}).get('name', '')
+            self.db.save_consultation_request(user_id, name, phone)
+            
+            # Notify admins
+            self._notify_admins_about_consultation(name, phone)
+            
+            # Reset conversation state
+            self.conversation_manager.reset_state(user_id)
+            
+            response = f"Спасибо за заявку! Мы свяжемся с вами в ближайшее время для подтверждения консультации."
+            self.conversation_manager.add_message(user_id, "bot", response)
+            
+            return {
+                'text': response,
+                'keyboard': self.keyboard_generator.generate_main_menu()
+            }
+    
+    def _is_admin_help_request(self, message: str) -> bool:
+        """Check if message is requesting admin help"""
+        message = message.lower()
+        help_phrases = [
+            "оператор", "администратор", "менеджер", "помощь",
+            "человек", "поговорить с человеком", "нужен человек",
+            "свяжите с", "переключите на", "нужна помощь"
+        ]
+        return any(phrase in message for phrase in help_phrases)
+    
+    def _handle_admin_help_request(self, user_id: int, message: str) -> Dict[str, Any]:
+        """Handle request for admin help"""
+        # Disable AI for this user
+        self.conversation_manager.disable_ai(user_id)
+        
+        # Notify admins
+        self._notify_admins_about_help_request(user_id, message)
+        
+        return {
+            'text': "Я перевожу Вас на администратора. Пожалуйста, подождите немного.",
+            'keyboard': None
+        }
+    
+    def _notify_admins_about_consultation(self, name: str, phone: str) -> None:
+        """Notify admins about new consultation request"""
+        admin_ids = self.db.get_admin_ids()
+        message = f"Новая заявка на консультацию:\nИмя: {name}\nТелефон: {phone}"
+        
+        for admin_id in admin_ids:
+            try:
+                self.vk.messages.send(
+                    user_id=admin_id,
+                    message=message,
+                    random_id=0
+                )
+            except Exception as e:
+                self.logger.error(f"Ошибка при отправке уведомления администратору {admin_id}: {e}")
+    
+    def _notify_admins_about_help_request(self, user_id: int, message: str) -> None:
+        """Notify admins about help request"""
+        admin_ids = self.db.get_admin_ids()
+        notification = f"Пользователь {user_id} запросил помощь администратора.\nСообщение: {message}"
+        
+        for admin_id in admin_ids:
+            try:
+                self.vk.messages.send(
+                    user_id=admin_id,
+                    message=notification,
+                    random_id=0
+                )
+            except Exception as e:
+                self.logger.error(f"Ошибка при отправке уведомления администратору {admin_id}: {e}")
+    
+    def _is_admin(self, user_id: int) -> bool:
+        """Check if user is admin"""
+        admin_ids = self.db.get_admin_ids()
+        return user_id in admin_ids
     
     def _is_greeting(self, text: str) -> bool:
         """
@@ -767,7 +638,7 @@ class MessageHandler:
             }
             
             try:
-                # Метод для сохранения консультации
+                # Метод для сохранения консультации (необходимо создать в excel_handler)
                 self.excel_handler.add_consultation(consultation_data)
                 self.logger.info(f"Консультация сохранена для пользователя {user_id}: {consultation_data}")
             except Exception as e:
@@ -921,7 +792,7 @@ class MessageHandler:
                 self.excel_handler.add_consultation(consultation_data)
                 self.logger.info(f"Консультация сохранена для пользователя {user_id}: {consultation_data}")
             except Exception as e:
-                self.logger.error(f"Ошибка при сохранении консультации: {e}")
+                    self.logger.error(f"Ошибка при сохранении консультации: {e}")
             
             # Complete consultation request
             self.conversation_manager.reset_state(user_id)
@@ -976,6 +847,6 @@ class MessageHandler:
         # Собираем все сообщения в один текст для анализа контекста
         for msg in messages:
             if msg.get("role") == "bot":
-                context += " " + msg.get("text", "")
+                context += " " + msg.get("content", "")
                 
         return context.lower() 

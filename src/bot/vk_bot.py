@@ -149,20 +149,9 @@ class VkBot:
             self.logger.debug(f"Передача сообщения в MessageHandler для пользователя {user_id}")
             response = self.message_handler.process_message(user_id, message_text, payload)
             
-            # Получаем ответ
-            response_text = response.get('text', 'Извините, произошла ошибка при обработке вашего сообщения.')
-            keyboard = response.get('keyboard')
-            
-            # Обрезаем длинный ответ для лога
-            log_response = response_text[:100] + "..." if len(response_text) > 100 else response_text
-            self.logger.info(f"Исходящее сообщение к ID {user_id}: '{log_response}'")
-            
-            # Проверяем, чтобы не отправлять пустой ответ
-            if not response_text:
-                response_text = "Извините, не могу сформировать ответ. Пожалуйста, попробуйте еще раз."
-            
-            # Отправляем ответ
-            self._send_message(peer_id, response_text, vk, keyboard)
+            # Send response if it exists
+            if response:
+                self._send_message(peer_id, response['text'], vk, response.get('keyboard'))
             
         except Exception as e:
             error_msg = f"Ошибка при обработке сообщения от {user_id}: {str(e)}"
