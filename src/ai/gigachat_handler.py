@@ -2,15 +2,16 @@ import json
 import logging
 import os
 import time
+import base64
+import requests
 from typing import List, Dict, Any, Optional
 
 try:
-    from gigachat import GigaChat as GigaChatSDK
+    from gigachat import GigaChat
     from gigachat.models import Chat, Messages, MessagesRole
     GIGACHAT_SDK_AVAILABLE = True
 except ImportError:
     GIGACHAT_SDK_AVAILABLE = False
-    import requests
 
 from dotenv import load_dotenv
 
@@ -26,8 +27,31 @@ class GigaChatHandler:
         """
         load_dotenv()
         self.logger = logging.getLogger(__name__)
-        self.api_key = os.getenv("GIGACHAT_API_KEY")
-        self.api_url = os.getenv("GIGACHAT_URL", "https://gigachat.devices.sberbank.ru/api/v1")
+        
+        # Get credentials from environment
+        self.client_id = os.getenv("GIGACHAT_CLIENT_ID")
+        self.client_secret = os.getenv("GIGACHAT_CLIENT_SECRET")
+        
+        if not self.client_id or not self.client_secret:
+            self.logger.warning("GIGACHAT_CLIENT_ID or GIGACHAT_CLIENT_SECRET not set in environment variables")
+            return
+            
+        # Initialize GigaChat client
+        try:
+            # Create authorization header
+            auth_string = f"{self.client_id}:{self.client_secret}"
+            auth_bytes = auth_string.encode('ascii')
+            base64_auth = base64.b64encode(auth_bytes).decode('ascii')
+            
+            self.giga = GigaChat(
+                credentials=base64_auth,
+                scope="GIGACHAT_API_PERS",
+                verify_ssl_certs=False
+            )
+            self.logger.info("Successfully initialized GigaChat client")
+        except Exception as e:
+            self.logger.error(f"Error initializing GigaChat client: {e}")
+            self.giga = None
         
         # Rate limiting settings
         self.last_request_time = 0
@@ -36,13 +60,60 @@ class GigaChatHandler:
         # Load knowledge base
         self.knowledge_base = self._load_knowledge_base()
         
-        # Check if we have API key
-        if not self.api_key:
-            self.logger.warning("GIGACHAT_API_KEY not set in environment variables. GigaChat features will be limited.")
-        
         # Check if SDK is available
         if not GIGACHAT_SDK_AVAILABLE:
             self.logger.warning("GigaChat SDK not installed. Using fallback implementation.")
+    
+    def _get_access_token(self) -> str:
+        """
+        Get access token using client credentials
+        """
+        try:
+            # Create authorization header
+            auth_string = f"{self.client_id}:{self.client_secret}"
+            auth_bytes = auth_string.encode('ascii')
+            base64_auth = base64.b64encode(auth_bytes).decode('ascii')
+            
+            headers = {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Accept': 'application/json',
+                'RqUID': str(int(time.time())),
+                'Authorization': f'Basic {base64_auth}'
+            }
+            
+            data = {
+                'scope': 'GIGACHAT_API_PERS'
+            }
+            
+            self.logger.info(f"Attempting to get access token with client_id: {self.client_id[:5]}...")
+            self.logger.debug(f"Request URL: {self.api_url}/oauth")
+            self.logger.debug(f"Request headers: {headers}")
+            self.logger.debug(f"Request data: {data}")
+            
+            response = requests.post(
+                f"{self.api_url}/oauth",
+                headers=headers,
+                data=data,
+                verify=False,
+                timeout=30
+            )
+            
+            self.logger.info(f"OAuth response status: {response.status_code}")
+            self.logger.debug(f"OAuth response headers: {dict(response.headers)}")
+            self.logger.debug(f"OAuth response body: {response.text}")
+            
+            if response.status_code == 200:
+                token_data = response.json()
+                self.logger.info("Successfully obtained access token")
+                return token_data['access_token']
+            else:
+                error_msg = f"Error getting access token: {response.status_code} - {response.text}"
+                self.logger.error(error_msg)
+                raise Exception(error_msg)
+                
+        except Exception as e:
+            self.logger.error(f"Error in _get_access_token: {str(e)}")
+            raise
     
     def _wait_for_rate_limit(self):
         """
@@ -67,7 +138,7 @@ class GigaChatHandler:
             Intent category (greeting, question, registration, consultation, event, feedback, other)
         """
         # If GigaChat API is not available or SDK not installed, use simple rule-based detection
-        if not self.api_key or not GIGACHAT_SDK_AVAILABLE:
+        if not self.client_id or not self.client_secret or not GIGACHAT_SDK_AVAILABLE:
             self.logger.warning("API key missing or SDK not available, using simple intent detection")
             return self._simple_intent_detection(message)
         
@@ -87,7 +158,7 @@ class GigaChatHandler:
             Верни только название категории без дополнительных пояснений."""
             
             with GigaChatSDK(
-                credentials=self.api_key,
+                credentials=self._get_access_token(),
                 base_url="https://gigachat.devices.sberbank.ru/api/v1",
                 scope="GIGACHAT_API_PERS",
                 verify_ssl_certs=False,
@@ -260,14 +331,14 @@ class GigaChatHandler:
             needs_greeting = True
             if message_history:
                 for msg in message_history:
-                        self.logger.info(f"Checking message: {msg}")
-                        if msg.get("role") == "bot":
-                            content = msg.get("content", "").lower()
-                            self.logger.info(f"Bot message content: {content}")
-                            if any(greeting in content for greeting in ["здравствуйте", "добрый день", "привет"]):
-                                needs_greeting = False
-                                self.logger.info("Found greeting in history, no need to add another one")
-                                break
+                    self.logger.info(f"Checking message: {msg}")
+                    if msg.get("role") == "bot":
+                        content = msg.get("content", "").lower()
+                        self.logger.info(f"Bot message content: {content}")
+                        if any(greeting in content for greeting in ["здравствуйте", "добрый день", "привет"]):
+                            needs_greeting = False
+                            self.logger.info("Found greeting in history, no need to add another one")
+                            break
             
             self.logger.info(f"Needs greeting: {needs_greeting}")
             
@@ -294,31 +365,29 @@ class GigaChatHandler:
             
             self.logger.info(f"User prompt: {user_prompt}")
             
-            with GigaChatSDK(
-                credentials=self.api_key,
-                base_url="https://gigachat.devices.sberbank.ru/api/v1",
-                scope="GIGACHAT_API_PERS",
-                verify_ssl_certs=False,
-                verbose=True
-            ) as giga:
-                chat = Chat(
-                    messages=[
-                        Messages(
-                            role=MessagesRole.SYSTEM,
-                            content=system_prompt
-                        ),
-                        Messages(
-                            role=MessagesRole.USER,
-                            content=user_prompt
-                        )
-                    ],
-                    temperature=0.7,
-                    max_tokens=1000
-                )
-                
-                self.logger.info("Sending request to GigaChat API")
-                response = giga.chat(chat)
-                
+            if not self.giga:
+                raise Exception("GigaChat client not initialized")
+            
+            self._wait_for_rate_limit()
+            
+            chat = Chat(
+                messages=[
+                    Messages(
+                        role=MessagesRole.SYSTEM,
+                        content=system_prompt
+                    ),
+                    Messages(
+                        role=MessagesRole.USER,
+                        content=user_prompt
+                    )
+                ],
+                temperature=0.7,
+                max_tokens=1000
+            )
+            
+            self.logger.info("Sending request to GigaChat API")
+            response = self.giga.chat(chat)
+            
             generated_response = response.choices[0].message.content.strip()
             self.logger.info(f"Received response from GigaChat API: {generated_response}")
             
