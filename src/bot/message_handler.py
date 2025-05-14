@@ -9,6 +9,9 @@ from src.bot.knowledge_base import KnowledgeBase
 from src.bot.conversation_manager import ConversationManager
 from src.bot.keyboard_generator import KeyboardGenerator
 from src.database.excel_handler import ExcelHandler
+from src.bot.structured_response import StructuredResponseHandler
+from src.ai.rag_singleton import RAGSingleton
+from src.utils.document_manager import DocumentManager
 
 
 class MessageHandler:
@@ -30,6 +33,9 @@ class MessageHandler:
         self.conversation_manager = ConversationManager()
         self.keyboard_generator = KeyboardGenerator()
         self.excel_handler = ExcelHandler()
+        self.response_handler = StructuredResponseHandler(self.knowledge_base)
+        self.rag_handler = RAGSingleton()
+        self.document_manager = DocumentManager()
         
     def process_message(self, user_id: int, message_text: str, payload: Optional[str] = None) -> Dict[str, Any]:
         """
@@ -84,14 +90,26 @@ class MessageHandler:
         if self._is_admin_help_request(message_text):
             return self._handle_admin_help_request(user_id, message_text)
         
-        # Всегда используем GigaChat для генерации ответов
         try:
+            # Получаем релевантную информацию из RAG
+            rag_response, relevant_docs = self.rag_handler.get_rag_response(message_text)
+            
             # Получаем историю сообщений
             message_history = self.conversation_manager.get_message_history(user_id)
             self.logger.info(f"Retrieved message history for GigaChat: {message_history}")
             
-            # Генерируем ответ с помощью GigaChat
-            ai_response = self.ai_handler.generate_response(message_text, message_history)
+            # Формируем контекст для GigaChat с учетом RAG
+            context = ""
+            if rag_response:
+                context = f"\nРелевантная информация из базы знаний:\n{rag_response}\n"
+                self.logger.info(f"Found relevant RAG response: {rag_response}")
+            
+            # Генерируем ответ с помощью GigaChat с учетом контекста из RAG
+            ai_response = self.ai_handler.generate_response(
+                message_text,
+                message_history,
+                additional_context=context
+            )
             self.logger.info(f"Generated AI response: {ai_response}")
             
             # Добавляем сообщение бота в историю
@@ -178,17 +196,42 @@ class MessageHandler:
                     'keyboard': self.keyboard_generator.generate_cancel_button()
                 }
             
+            self.conversation_manager.update_state(user_id, {
+                'state': 'consultation_form',
+                'stage': 'contact_time',
+                'data': {**state.get('data', {}), 'phone': message}
+            })
+            
+            response = "В какое время вам удобно, чтобы мы с вами связались? Пожалуйста, укажите предпочтительное время для звонка в промежутке с 10:00 до 17:00 по будним дням:"
+            self.conversation_manager.add_message(user_id, "bot", response)
+            
+            return {
+                'text': response,
+                'keyboard': self.keyboard_generator.generate_cancel_button()
+            }
+            
+        elif stage == 'contact_time':
+            # Validate contact time format and range
+            time_str = message.lower().replace('с', '').replace('до', '-').strip()
+            # Simple validation - just ensure it mentions time between 10:00 and 17:00
+            if not any(str(hour) in time_str for hour in range(10, 18)):
+                return {
+                    'text': "Пожалуйста, укажите время для звонка с 10:00 до 17:00 в рабочие дни.",
+                    'keyboard': self.keyboard_generator.generate_cancel_button()
+                }
+            
             # Save consultation request
             name = state.get('data', {}).get('name', '')
-            self.db.save_consultation_request(user_id, name, phone)
+            phone = state.get('data', {}).get('phone', '')
+            self.db.save_consultation_request(user_id, name, phone, time_str)
             
             # Notify admins
-            self._notify_admins_about_consultation(name, phone)
+            self._notify_admins_about_consultation(name, phone, time_str)
             
             # Reset conversation state
             self.conversation_manager.reset_state(user_id)
             
-            response = f"Спасибо за заявку! Мы свяжемся с вами в ближайшее время для подтверждения консультации."
+            response = f"Спасибо за заявку! Мы свяжемся с вами в указанное время ({time_str}) для подтверждения консультации."
             self.conversation_manager.add_message(user_id, "bot", response)
             
             return {
@@ -219,10 +262,10 @@ class MessageHandler:
             'keyboard': None
         }
     
-    def _notify_admins_about_consultation(self, name: str, phone: str) -> None:
+    def _notify_admins_about_consultation(self, name: str, phone: str, time: str) -> None:
         """Notify admins about new consultation request"""
         admin_ids = self.db.get_admin_ids()
-        message = f"Новая заявка на консультацию:\nИмя: {name}\nТелефон: {phone}"
+        message = f"Новая заявка на консультацию:\nИмя: {name}\nТелефон: {phone}\nВремя: {time}"
         
         for admin_id in admin_ids:
             try:
@@ -521,6 +564,58 @@ class MessageHandler:
             response = f"Вопрос: {question}\n\nОтвет: {answer}"
             self.conversation_manager.add_message(user_id, "bot", response)
             
+            return {
+                "text": response,
+                "keyboard": self.keyboard_generator.generate_back_button()
+            }
+        
+        # Document management commands
+        elif command == "docs_list":
+            category = payload.get("category")
+            documents = self.document_manager.list_documents(category)
+            
+            if not documents:
+                response = "В базе знаний пока нет документов."
+                if category:
+                    response = f"В категории {category} пока нет документов."
+            else:
+                response = "Документы в базе знаний:\n\n"
+                for doc in documents:
+                    info = self.document_manager.get_document_info(str(doc))
+                    if info:
+                        response += f"📄 {info['name']}\n"
+                        response += f"   Категория: {info['category']}\n"
+                        response += f"   Добавлен: {info['created'][:10]}\n\n"
+            
+            self.conversation_manager.add_message(user_id, "bot", response)
+            return {
+                "text": response,
+                "keyboard": self.keyboard_generator.generate_back_button()
+            }
+            
+        elif command == "doc_info":
+            doc_path = payload.get("doc_path")
+            if not doc_path:
+                return {
+                    "text": "Не указан путь к документу.",
+                    "keyboard": self.keyboard_generator.generate_back_button()
+                }
+            
+            info = self.document_manager.get_document_info(doc_path)
+            if not info:
+                return {
+                    "text": "Документ не найден.",
+                    "keyboard": self.keyboard_generator.generate_back_button()
+                }
+            
+            response = f"Информация о документе:\n\n"
+            response += f"📄 Название: {info['name']}\n"
+            response += f"📁 Категория: {info['category']}\n"
+            response += f"📅 Добавлен: {info['created'][:10]}\n"
+            response += f"🔄 Изменен: {info['modified'][:10]}\n"
+            response += f"📊 Размер: {info['size']} байт\n"
+            
+            self.conversation_manager.add_message(user_id, "bot", response)
             return {
                 "text": response,
                 "keyboard": self.keyboard_generator.generate_back_button()
@@ -850,3 +945,67 @@ class MessageHandler:
                 context += " " + msg.get("content", "")
                 
         return context.lower() 
+
+    def _handle_user_message(self, user_id: int, message_text: str) -> Dict[str, Any]:
+        """
+        Handle user message
+        
+        Args:
+            user_id: User ID
+            message_text: Message text
+            
+        Returns:
+            Response data
+        """
+        # Сохраняем сообщение пользователя
+        self.conversation_manager.add_message(user_id, "user", message_text)
+        
+        # Пробуем получить ответ через RAG
+        rag_response, relevant_docs = self.rag_handler.get_rag_response(message_text)
+        
+        if rag_response:
+            # Проверяем уверенность в ответе
+            if "не уверен" in rag_response.lower() or "возможно" in rag_response.lower():
+                response = "Извините, я не могу дать точный ответ на ваш вопрос. Не могли бы вы переформулировать его, чтобы я лучше понял, что именно вас интересует?"
+                self.conversation_manager.add_message(user_id, "bot", response)
+                return {
+                    "text": response,
+                    "keyboard": self.keyboard_generator.generate_main_menu()
+                }
+            
+            # Форматируем ответ через StructuredResponseHandler
+            formatted_response = self.response_handler.format_response(rag_response)
+            
+            # Добавляем информацию об источниках, если есть релевантные документы
+            if relevant_docs:
+                context_info = "\n\nИспользованные источники:\n"
+                for i, doc in enumerate(relevant_docs, 1):
+                    context = doc.get("context", "").strip()
+                    if context:
+                        context_info += f"{i}. Раздел: {context}\n"
+                formatted_response += context_info
+            
+            self.conversation_manager.add_message(user_id, "bot", formatted_response)
+            return {
+                "text": formatted_response,
+                "keyboard": self.keyboard_generator.generate_main_menu()
+            }
+        
+        # Если RAG не нашел ответ, пробуем обычный поиск
+        structured_response = self.response_handler.get_structured_response(message_text)
+        
+        if structured_response:
+            self.conversation_manager.add_message(user_id, "bot", structured_response)
+            return {
+                "text": structured_response,
+                "keyboard": self.keyboard_generator.generate_main_menu()
+            }
+        
+        # Если ни один метод не нашел точного ответа
+        response = "Извините, я не могу дать точный ответ на ваш вопрос. Пожалуйста, переформулируйте его, чтобы я лучше понял, что именно вас интересует. Вы также можете уточнить детали или задать более конкретный вопрос."
+        self.conversation_manager.add_message(user_id, "bot", response)
+        
+        return {
+            "text": response,
+            "keyboard": self.keyboard_generator.generate_main_menu()
+        } 

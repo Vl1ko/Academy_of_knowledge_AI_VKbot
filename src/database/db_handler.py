@@ -75,6 +75,7 @@ class ConsultationRequest(Base):
     user_id = Column(Integer, ForeignKey('users.id'))
     name = Column(String)
     phone = Column(String)
+    preferred_contact_time = Column(String)
     status = Column(String, default='new')  # new, confirmed, completed, cancelled
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -306,7 +307,7 @@ class DatabaseHandler:
         admins = self.session.query(User).filter_by(is_admin=True).all()
         return [admin.vk_id for admin in admins]
 
-    def save_consultation_request(self, vk_id: int, name: str, phone: str) -> bool:
+    def save_consultation_request(self, vk_id: int, name: str, phone: str, preferred_contact_time: str) -> bool:
         """Save consultation request"""
         try:
             user = self.session.query(User).filter_by(vk_id=vk_id).first()
@@ -317,7 +318,8 @@ class DatabaseHandler:
             request = ConsultationRequest(
                 user_id=user.id,
                 name=name,
-                phone=phone
+                phone=phone,
+                preferred_contact_time=preferred_contact_time
             )
             self.session.add(request)
             self.session.commit()

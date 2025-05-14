@@ -27,11 +27,6 @@ class KeyboardGenerator:
         keyboard.add_line()
         
         # Third row
-        keyboard.add_button("Цены", color=VkKeyboardColor.SECONDARY)
-        keyboard.add_button("Расписание", color=VkKeyboardColor.SECONDARY)
-        keyboard.add_line()
-        
-        # Fourth row
         keyboard.add_button("Связаться с администратором", color=VkKeyboardColor.NEGATIVE)
         
         return keyboard.get_keyboard()

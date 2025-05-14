@@ -14,6 +14,7 @@ except ImportError:
     GIGACHAT_SDK_AVAILABLE = False
 
 from dotenv import load_dotenv
+from src.ai.rag_singleton import RAGSingleton
 
 
 class GigaChatHandler:
@@ -57,8 +58,8 @@ class GigaChatHandler:
         self.last_request_time = 0
         self.min_request_interval = 1.0  # Minimum time between requests in seconds
         
-        # Load knowledge base
-        self.knowledge_base = self._load_knowledge_base()
+        # Initialize RAG singleton
+        self.rag = RAGSingleton()
         
         # Check if SDK is available
         if not GIGACHAT_SDK_AVAILABLE:
@@ -208,201 +209,160 @@ class GigaChatHandler:
         """
         message = message.lower()
         
-        # Greeting detection
-        greeting_phrases = ["привет", "здравствуй", "добрый день", "доброе утро", "добрый вечер", "hello", "hi"]
-        if any(phrase in message for phrase in greeting_phrases) or len(message) < 10:
+        # Greeting patterns
+        if any(word in message for word in ["привет", "здравствуй", "добрый", "доброе утро", "добрый день", "добрый вечер"]):
             return "greeting"
-        
-        # Registration detection
-        registration_phrases = ["запис", "поступ", "зачисл", "прием", "принять", "подать заявл"]
-        if any(phrase in message for phrase in registration_phrases):
-            return "registration"
-        
-        # Consultation detection
-        consultation_phrases = ["консультац", "посовет", "встреч", "пообщат", "обсуд"]
-        if any(phrase in message for phrase in consultation_phrases):
-            return "consultation"
-        
-        # Event detection
-        event_phrases = ["мероприят", "событ", "праздник", "выступлен", "концерт", "собран"]
-        if any(phrase in message for phrase in event_phrases):
-            return "event"
-        
-        # Feedback detection
-        feedback_phrases = ["отзыв", "мнени", "впечатл", "жалоб", "претензи", "понравил", "не понравил"]
-        if any(phrase in message for phrase in feedback_phrases):
-            return "feedback"
-        
-        # Question detection (default for longer messages)
-        if "?" in message or len(message) > 20:
+            
+        # Question patterns
+        if any(word in message for word in ["как", "где", "когда", "сколько", "какой", "какая", "какие", "что", "чем", "кто", "почему"]):
             return "question"
-        
-        # Default intent
+            
+        # Registration patterns
+        if any(word in message for word in ["запись", "записаться", "поступить", "зачислить", "регистрация"]):
+            return "registration"
+            
+        # Consultation patterns
+        if any(word in message for word in ["консультация", "проконсультировать", "посоветовать", "помочь", "помощь"]):
+            return "consultation"
+            
+        # Event patterns
+        if any(word in message for word in ["мероприятие", "событие", "праздник", "концерт", "выступление"]):
+            return "event"
+            
+        # Feedback patterns
+        if any(word in message for word in ["отзыв", "жалоба", "претензия", "благодарность", "спасибо"]):
+            return "feedback"
+            
         return "other"
     
-    def _load_knowledge_base(self) -> Dict[str, Any]:
-        """
-        Load all knowledge base files
-        """
-        knowledge_base = {}
-        base_path = "data/knowledge_base"
-        
-        try:
-            # Load FAQ
-            with open(f"{base_path}/faq.json", "r", encoding="utf-8") as f:
-                knowledge_base["faq"] = json.load(f)
-            
-            # Load school info
-            with open(f"{base_path}/school.json", "r", encoding="utf-8") as f:
-                knowledge_base["school"] = json.load(f)
-            
-            # Load kindergarten info
-            with open(f"{base_path}/kindergarten.json", "r", encoding="utf-8") as f:
-                knowledge_base["kindergarten"] = json.load(f)
-            
-            # Load other knowledge files
-            for file in ["schedule.json", "documents.json", "general.json"]:
-                try:
-                    with open(f"{base_path}/{file}", "r", encoding="utf-8") as f:
-                        knowledge_base[file.replace(".json", "")] = json.load(f)
-                except FileNotFoundError:
-                    self.logger.warning(f"Knowledge base file {file} not found")
-                
-        except Exception as e:
-            self.logger.error(f"Error loading knowledge base: {e}")
-            
-        return knowledge_base
-    
     def _prepare_system_prompt(self, message_history: Optional[List[Dict[str, str]]] = None) -> str:
-        """Prepare system prompt for GigaChat"""
-        return f"""Ты - дружелюбный и профессиональный ассистент частной школы "Академия знаний" в группе ВК. 
-Твоя задача - помогать родителям получить информацию о школе и образовательных программах.
-
-Источник информации:
-{json.dumps(self.knowledge_base, ensure_ascii=False, indent=2)}
-
-Контекст диалога:
-{message_history}
+        """
+        Prepare system prompt for the model
+        
+        Args:
+            message_history: Optional list of previous messages
+            
+        Returns:
+            System prompt string
+        """
+        base_prompt = """Ты - помощник школы и детского сада "Академик". Твоя задача - помогать родителям и отвечать на их вопросы.
 
 Правила общения:
-1. Если это первое сообщение в диалоге, то начинай с приветствия
-2. Используй дружелюбный, но профессиональный тон
-3. Отвечай развернуто и информативно
-4. Используй эмодзи для выделения ключевых моментов
-5. В конце каждого ответа всегда задавай уточняющий вопрос для продолжения диалога, на основе контекста
+1. Всегда будь вежливым и профессиональным, не допускай неточности
+2. Используй информацию только из предоставленной базы знаний
+3. Если не знаешь точного ответа, предложи связаться с администратором
+4. Всегда форматируй ответы на абзацы. Старайся структурировать перечисления по пунктам, когда это уместно
+5. Добавляй уточняющие вопросы, когда это уместно
+6. Предлагай записаться на консультацию для получения более подробной информации
 
 Структура ответа:
-1. Основная информация по запросу
-2. Дополнительные интересные факты или детали
-3. Всегда Уточняющий вопрос для продолжения диалога
+1. Приветствие (если это начало диалога)
+2. Краткий прямой ответ на вопрос (1-2 предложения)
+3. Детальная информация, разбитая на подпункты с использованием маркеров списка
+4. Дополнительная важная информация (например, о питании или доп. услугах)
+5. Уточняющий вопрос или предложение записаться на консультацию
 
-Пример хорошего ответа:
-Стоимость обучения в нашей школе составляет 26100 рублей в месяц. 
-В эту сумму входит:
-• Обучение по основной образовательной программе
-• Группы до 15 человек
-• Работа с 8:00 до 18:00
-• Дополнительные предметы: английский язык, шахматы, робототехника
+Пример структурированного ответа:
+Здравствуйте!
 
-Хотите узнать подробнее о какой-то конкретной программе или у вас есть другие вопросы? 😊"
+Стоимость обучения в 1 классе составляет 26100 рублей в месяц за качественное обучение в классе до 13 человек.
 
-Используй эту структуру для всех ответов, даже если вопрос кажется простым. Всегда старайся добавить что-то интересное и полезное, что может заинтересовать родителей. Обязательно задавай уточняющий вопрос для продолжения диалога, на основе контекста."""
+В стоимость включено:
+• Время пребывания в школе с 8.00 до 18.00
+• Расширенная углубленная программа обучения
+• Усиленный английский язык (3 часа в неделю)
+• Выполнение домашнего задания в школе
+• Прогулка и организованный досуг
+• Регулярная обратная связь для родителей
+
+Дополнительно оплачивается питание:
+• Комплекс "завтрак, обед, полдник" - 450 руб/день
+• Комплекс "завтрак, обед, полдник, ужин" - 500 руб/день
+
+На текущий момент осталось 2 места в 1 классе на 2025-2026 год. Хотели бы узнать подробнее о нашей программе обучения или сразу перейти к вступительным этапам?
+
+Если спрашивают о стоимости:
+1. Укажи ТОЧНУЮ стоимость из базы знаний
+2. Перечисли, что входит в стоимость
+3. Укажи дополнительные расходы (например, питание)
+4. Предложи записаться на консультацию
+
+Если спрашивают о наличии мест:
+1. Укажи актуальное количество мест
+2. Предложи записаться на консультацию или экскурсию
+3. Если мест нет, предложи встать в резерв"""
+
+        if message_history:
+            context = "\n\nИстория диалога:\n"
+            for msg in message_history[-5:]:  # Only use last 5 messages for context
+                role = "Пользователь" if msg["role"] == "user" else "Бот"
+                context += f"{role}: {msg['content']}\n"
+            base_prompt += context
+            
+        return base_prompt
     
-    def generate_response(self, message: str, message_history: Optional[List[Dict[str, str]]] = None) -> str:
+    def generate_response(
+        self,
+        message: str,
+        message_history: Optional[List[Dict[str, str]]] = None,
+        additional_context: Optional[str] = None
+    ) -> str:
         """
-        Generate response to user message using GigaChat
+        Generate response using GigaChat API
+        
+        Args:
+            message: User message
+            message_history: Optional list of previous messages
+            additional_context: Optional additional context from RAG
+            
+        Returns:
+            Generated response
         """
+        if not self.client_id or not self.client_secret or not GIGACHAT_SDK_AVAILABLE:
+            self.logger.warning("API key missing or SDK not available, using fallback")
+            return self._fallback_response(message)
+            
         try:
-            self.logger.info(f"Received message: {message}")
-            self.logger.info(f"Message history: {message_history}")
-            
-            # Prepare context from history
-            context = ""
-            if message_history:
-                for msg in message_history:
-                    role = "assistant" if msg.get("role") == "bot" else "user"
-                    text = msg.get("content", "")
-                    if text:  # Add only non-empty messages
-                        context += f"{role}: {text}\n"
-            
-            self.logger.info(f"Formed context: {context}")
-            
-            # Check if we need to add a greeting
-            needs_greeting = True
-            if message_history:
-                for msg in message_history:
-                    self.logger.info(f"Checking message: {msg}")
-                    if msg.get("role") == "bot":
-                        content = msg.get("content", "").lower()
-                        self.logger.info(f"Bot message content: {content}")
-                        if any(greeting in content for greeting in ["здравствуйте", "добрый день", "привет"]):
-                            needs_greeting = False
-                            self.logger.info("Found greeting in history, no need to add another one")
-                            break
-            
-            self.logger.info(f"Needs greeting: {needs_greeting}")
-            
-            # Prepare system prompt with knowledge base
-            system_prompt = self._prepare_system_prompt(message_history)
-            
-            user_prompt = f"""
-            Контекст диалога:
-            {context}
-
-            Текущий запрос:
-            "{message}"
-
-            Сформируй оптимальный ответ, учитывая:
-            1. НЕ добавляй приветствие, так как оно уже есть в контексте
-            2. Используй информацию из базы знаний как основу, но генерируй уникальный ответ
-            3. Полноту информации (все ключевые аспекты запроса)
-            4. Точность данных (только проверенная информация)
-            5. Естественность общения (дружелюбный профессиональный тон)
-            6. В конце задай релевантный вопрос для продолжения диалога на основе контекста
-            7. Используй информацию ТОЛЬКО из базы знаний, не придумывай информацию от себя
-            8. Не используй форматирование в ответе, используй только текст
-            """
-            
-            self.logger.info(f"User prompt: {user_prompt}")
-            
-            if not self.giga:
-                raise Exception("GigaChat client not initialized")
-            
             self._wait_for_rate_limit()
             
+            # Get relevant context from RAG
+            rag_response, relevant_docs = self.rag.get_rag_response(message)
+            if rag_response:
+                if additional_context:
+                    additional_context = f"{additional_context}\n\nРелевантная информация из базы знаний:\n{rag_response}"
+                else:
+                    additional_context = f"Релевантная информация из базы знаний:\n{rag_response}"
+            
+            system_prompt = self._prepare_system_prompt(message_history)
+            if additional_context:
+                system_prompt += f"\n\nДополнительный контекст:\n{additional_context}"
+            
+            messages = [
+                Messages(
+                    role=MessagesRole.SYSTEM,
+                    content=system_prompt
+                ),
+                Messages(
+                    role=MessagesRole.USER,
+                    content=message
+                )
+            ]
+            
+            # Add message history if available
+            if message_history:
+                for msg in message_history[-5:]:  # Only use last 5 messages
+                    role = MessagesRole.USER if msg["role"] == "user" else MessagesRole.ASSISTANT
+                    messages.append(Messages(role=role, content=msg["content"]))
+            
             chat = Chat(
-                messages=[
-                    Messages(
-                        role=MessagesRole.SYSTEM,
-                        content=system_prompt
-                    ),
-                    Messages(
-                        role=MessagesRole.USER,
-                        content=user_prompt
-                    )
-                ],
+                messages=messages,
                 temperature=0.7,
                 max_tokens=1000
             )
             
             self.logger.info("Sending request to GigaChat API")
             response = self.giga.chat(chat)
-            
-            generated_response = response.choices[0].message.content.strip()
-            self.logger.info(f"Received response from GigaChat API: {generated_response}")
-            
-            # Remove greeting if it's not needed
-            if not needs_greeting:
-                # List of common greetings to remove
-                greetings = ["добрый день", "доброе утро", "добрый вечер", "здравствуйте", "привет"]
-                for greeting in greetings:
-                    if generated_response.lower().startswith(greeting):
-                        # Remove the greeting and any following punctuation
-                        generated_response = generated_response[len(greeting):].lstrip("!,. ")
-                        break
-            
-            self.logger.info(f"Final response after greeting check: {generated_response}")
-            return generated_response
+            return response.choices[0].message.content.strip()
             
         except Exception as e:
             self.logger.error(f"Error generating response: {e}")
@@ -410,18 +370,20 @@ class GigaChatHandler:
     
     def _fallback_response(self, message: str) -> str:
         """
-        Generate fallback response using knowledge base when API is not available
+        Generate fallback response when API is not available
+        
+        Args:
+            message: User message
+            
+        Returns:
+            Fallback response
         """
-        message_lower = message.lower()
+        # Try to get response from RAG first
+        try:
+            rag_response, _ = self.rag.get_rag_response(message)
+            if rag_response:
+                return rag_response
+        except Exception as e:
+            self.logger.error(f"Error getting RAG response: {e}")
         
-        # Try to find relevant information in knowledge base
-        for section in self.knowledge_base.values():
-            if isinstance(section, dict):
-                for key, value in section.items():
-                    if isinstance(key, str) and key.lower() in message_lower:
-                        return value
-                    if isinstance(value, str) and value.lower() in message_lower:
-                        return value
-        
-        # Default response if no relevant information found
         return "Извините, я не могу сейчас дать точный ответ на ваш вопрос. Предлагаю записаться на консультацию с нашим администратором, который сможет подробно ответить на все ваши вопросы. Хотите записаться на консультацию?"
