@@ -13,7 +13,7 @@ transformers
 sentence-transformers
 scikit-learn
 numpy
-docx
+python-docx
 PyYAML
 SQLAlchemy
 tenacity
@@ -22,3 +22,6 @@ fastapi
 uvicorn
 celery
 redis
+psycopg2-binary
+openpyxl
+gigachat
