@@ -1,7 +1,8 @@
 import logging
+import time
 import traceback
 import json
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 import vk_api
 from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
@@ -10,6 +11,9 @@ from src.bot.message_handler import MessageHandler
 from src.bot.keyboard_generator import KeyboardGenerator
 from config.config import VK_TOKEN, BOT_SETTINGS
 from src.database.db_handler import DatabaseHandler
+
+# Модульный логгер для функций вне класса
+logger = logging.getLogger(__name__)
 
 
 class VkBot:
@@ -176,22 +180,54 @@ class VkBot:
         message_preview = message if len(message) <= 100 else message[:97] + "..."
         self.logger.info(f"Исходящее сообщение к ID {peer_id}: '{message_preview}'")
         
-        params = {
-            'peer_id': peer_id,
-            'message': message,
-            'random_id': 0,
-            'access_token': VK_TOKEN,
-            'v': '5.131'
-        }
-        
-        if keyboard:
-            self.logger.debug(f"Добавление клавиатуры к сообщению для пользователя {peer_id}")
-            params['keyboard'] = keyboard
-        
-        try:
-            vk.messages.send(**params)
-        except vk_api.VkApiError as e:
-            self.logger.error(f"Ошибка при отправке сообщения пользователю {peer_id}: {str(e)}", exc_info=True)
+        def _chunk_text(text: str, limit: int = 3500) -> List[str]:
+            # Безопасно режем по абзацам/строкам, затем по словам, не превышая лимит
+            parts: List[str] = []
+            for paragraph in text.split('\n\n'):
+                if len(paragraph) <= limit:
+                    parts.append(paragraph)
+                else:
+                    # Режем большой абзац по строкам/словам
+                    current = ""
+                    for line in paragraph.split('\n'):
+                        if len(line) > limit:
+                            words = line.split(' ')
+                            for w in words:
+                                if len(current) + len(w) + 1 > limit:
+                                    if current:
+                                        parts.append(current)
+                                    current = w
+                                else:
+                                    current = (current + ' ' + w).strip()
+                        else:
+                            if len(current) + len(line) + 1 > limit:
+                                if current:
+                                    parts.append(current)
+                                current = line
+                            else:
+                                current = (current + '\n' + line).strip()
+                    if current:
+                        parts.append(current)
+            # Убираем пустые
+            return [p for p in parts if p.strip()]
+
+        chunks = _chunk_text(message)
+        for idx, chunk in enumerate(chunks):
+            params = {
+                'peer_id': peer_id,
+                'message': chunk,
+                'random_id': 0,
+                'access_token': VK_TOKEN,
+                'v': '5.131'
+            }
+            # Клавиатуру отправляем только с последней частью, чтобы не дублировать
+            if keyboard and idx == len(chunks) - 1:
+                self.logger.debug(f"Добавление клавиатуры к сообщению для пользователя {peer_id}")
+                params['keyboard'] = keyboard
+            try:
+                vk.messages.send(**params)
+            except vk_api.VkApiError as e:
+                self.logger.error(f"Ошибка при отправке сообщения пользователю {peer_id}: {str(e)}", exc_info=True)
     
     def _handle_admin_command(self, user_id: int, command: str, peer_id: int, vk) -> None:
         """
@@ -301,10 +337,132 @@ class VkBot:
             except (ValueError, TypeError) as e:
                 self._send_message(peer_id, f"Ошибка в формате даты или количества участников: {e}", vk)
         
+        elif command_name == '/add':
+            # Add admin - check if user is admin or if this is the first admin
+            if len(command_parts) != 2:
+                self._send_message(peer_id, "Использование: /add <VK_ID>", vk)
+                return
+            
+            try:
+                target_vk_id = int(command_parts[1])
+                if target_vk_id <= 0:
+                    self._send_message(peer_id, "VK ID должен быть положительным числом.", vk)
+                    return
+                
+                # Check if user is admin or if this is the first admin
+                admin_ids = self.db.get_admin_ids()
+                if user_id not in admin_ids and len(admin_ids) > 0:
+                    self._send_message(peer_id, "У вас нет прав для выполнения административных команд.", vk)
+                    return
+                
+                # Get user name from VK API
+                try:
+                    import vk_api
+                    vk_session = vk_api.VkApi(token=VK_TOKEN)
+                    vk_api_instance = vk_session.get_api()
+                    user_info = vk_api_instance.users.get(user_ids=target_vk_id, fields='first_name,last_name')
+                    
+                    if user_info and len(user_info) > 0:
+                        user = user_info[0]
+                        first_name = user.get('first_name', '')
+                        last_name = user.get('last_name', '')
+                        user_name = f"{first_name} {last_name}".strip() if first_name and last_name else first_name or last_name or "Неизвестный пользователь"
+                    else:
+                        user_name = "Неизвестный пользователь"
+                except Exception as e:
+                    self.logger.error(f"Error getting user name for {target_vk_id}: {e}")
+                    user_name = "Неизвестный пользователь"
+                
+                # Check if user exists in database
+                from src.database.db_handler import User
+                existing_user = self.db.session.query(User).filter_by(vk_id=target_vk_id).first()
+                
+                if existing_user:
+                    # Update existing user
+                    existing_user.is_admin = True
+                    if not existing_user.name:
+                        existing_user.name = user_name
+                    self.db.session.commit()
+                    response = f"✅ Пользователь {user_name} (ID: {target_vk_id}) назначен администратором"
+                else:
+                    # Create new admin user
+                    new_admin = User(
+                        vk_id=target_vk_id,
+                        name=user_name,
+                        is_admin=True
+                    )
+                    self.db.session.add(new_admin)
+                    self.db.session.commit()
+                    response = f"✅ Создан новый администратор {user_name} (ID: {target_vk_id})"
+                
+                self.logger.info(f"Admin {user_id} added admin {target_vk_id} ({user_name})")
+                self._send_message(peer_id, response, vk)
+                
+            except ValueError:
+                self._send_message(peer_id, "VK ID должен быть числом. Используйте: /add <VK_ID>", vk)
+            except Exception as e:
+                self.logger.error(f"Error adding admin {target_vk_id}: {e}")
+                self.db.session.rollback()
+                self._send_message(peer_id, f"❌ Ошибка при добавлении администратора: {str(e)}", vk)
+        
+        elif command_name == '/del':
+            # Remove admin rights
+            if len(command_parts) != 2:
+                self._send_message(peer_id, "Использование: /del <VK_ID>", vk)
+                return
+            
+            try:
+                target_vk_id = int(command_parts[1])
+                if target_vk_id <= 0:
+                    self._send_message(peer_id, "VK ID должен быть положительным числом.", vk)
+                    return
+                
+                # Check if user is admin
+                admin_ids = self.db.get_admin_ids()
+                if user_id not in admin_ids:
+                    self._send_message(peer_id, "У вас нет прав для выполнения административных команд.", vk)
+                    return
+                
+                # Prevent self-removal
+                if target_vk_id == user_id:
+                    self._send_message(peer_id, "❌ Вы не можете удалить права администратора у самого себя.", vk)
+                    return
+                
+                # Find user in database
+                from src.database.db_handler import User
+                user = self.db.session.query(User).filter_by(vk_id=target_vk_id).first()
+                
+                if not user:
+                    self._send_message(peer_id, f"❌ Пользователь с ID {target_vk_id} не найден в базе данных.", vk)
+                    return
+                
+                if not user.is_admin:
+                    self._send_message(peer_id, f"❌ Пользователь {user.name or target_vk_id} не является администратором.", vk)
+                    return
+                
+                # Remove admin rights
+                user.is_admin = False
+                self.db.session.commit()
+                
+                user_name = user.name or f"ID: {target_vk_id}"
+                response = f"✅ Права администратора удалены у пользователя {user_name}"
+                
+                self.logger.info(f"Admin {user_id} removed admin rights from {target_vk_id} ({user_name})")
+                self._send_message(peer_id, response, vk)
+                
+            except ValueError:
+                self._send_message(peer_id, "VK ID должен быть числом. Используйте: /del <VK_ID>", vk)
+            except Exception as e:
+                self.logger.error(f"Error removing admin {target_vk_id}: {e}")
+                self.db.session.rollback()
+                self._send_message(peer_id, f"❌ Ошибка при удалении прав администратора: {str(e)}", vk)
+        
         elif command_name == '/help':
             # Show admin help
             help_text = """Команды администратора:
 /stats - Статистика бота
+/add <VK_ID> - Добавить администратора
+/del <VK_ID> - Удалить права администратора
 /addfaq <вопрос> | <ответ> - Добавить вопрос и ответ в FAQ
 /addknowledge <категория> <ключ> | <значение> - Добавить знание в базу знаний
 /addevent <название> | <описание> | <дата> | <макс_участников> - Добавить мероприятие

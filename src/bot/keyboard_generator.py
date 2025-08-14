@@ -27,7 +27,7 @@ class KeyboardGenerator:
         keyboard.add_line()
         
         # Third row
-        keyboard.add_button("Связаться с администратором", color=VkKeyboardColor.NEGATIVE)
+        keyboard.add_button("Связаться с администратором", color=VkKeyboardColor.NEGATIVE, payload={"command": "admin_help"})
         
         return keyboard.get_keyboard()
     
@@ -36,6 +36,25 @@ class KeyboardGenerator:
         keyboard = VkKeyboard(one_time=False)
         keyboard.add_button("Отмена", color=VkKeyboardColor.NEGATIVE)
         return keyboard.get_keyboard()
+    
+    def generate_finish_dialog_keyboard(self) -> str:
+        """Generate keyboard with finish dialog button"""
+        keyboard = {
+            "one_time": False,
+            "buttons": [
+                [
+                    {
+                        "action": {
+                            "type": "text",
+                            "label": "Завершить диалог с менеджером",
+                            "payload": json.dumps({"command": "finish_dialog"})
+                        },
+                        "color": "negative"
+                    }
+                ]
+            ]
+        }
+        return json.dumps(keyboard, ensure_ascii=False)
     
     def generate_admin_menu(self) -> Dict[str, Any]:
         """Generate admin menu keyboard"""

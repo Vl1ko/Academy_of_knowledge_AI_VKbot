@@ -249,6 +249,21 @@ class DatabaseHandler:
             self.logger.error(f"Error updating user last message: {e}")
             self.session.rollback()
             return False
+    
+    def update_user_phone(self, vk_id: int, phone: str) -> bool:
+        """Update user's phone number"""
+        try:
+            user = self.session.query(User).filter_by(vk_id=vk_id).first()
+            if user:
+                user.phone = phone
+                user.last_activity = datetime.utcnow()
+                self.session.commit()
+                return True
+            return False
+        except Exception as e:
+            self.logger.error(f"Error updating user phone: {e}")
+            self.session.rollback()
+            return False
             
     def log_successful_kb_response(self, vk_id: int, query: str, response: str) -> bool:
         """Log successful knowledge base response"""

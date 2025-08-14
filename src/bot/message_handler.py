@@ -3,6 +3,9 @@ import json
 from typing import Dict, List, Any, Optional
 import re
 
+import vk_api
+from vk_api.exceptions import VkApiError
+
 from src.ai.gigachat_handler import GigaChatHandler
 from src.database.db_handler import DatabaseHandler
 from src.bot.knowledge_base import KnowledgeBase
@@ -12,6 +15,7 @@ from src.database.excel_handler import ExcelHandler
 from src.bot.structured_response import StructuredResponseHandler
 from src.ai.rag_singleton import RAGSingleton
 from src.utils.document_manager import DocumentManager
+from config.config import VK_TOKEN
 
 
 class MessageHandler:
@@ -37,6 +41,69 @@ class MessageHandler:
         self.rag_handler = RAGSingleton()
         self.document_manager = DocumentManager()
         
+        # Инициализация VK API для отправки уведомлений
+        try:
+            import vk_api
+            from config.config import VK_TOKEN
+            vk_session = vk_api.VkApi(token=VK_TOKEN)
+            self.vk = vk_session.get_api()
+        except Exception as e:
+            self.logger.error(f"Ошибка инициализации VK API: {e}")
+            self.vk = None
+
+    def _send_admin_notification(self, admin_id: int, message: str) -> None:
+        """
+        Send notification to admin
+        
+        Args:
+            admin_id: Admin VK ID
+            message: Message text
+        """
+        try:
+            if self.vk:
+                self.vk.messages.send(
+                    user_id=admin_id,
+                    message=message,
+                    random_id=0
+                )
+            else:
+                self.logger.warning(f"VK API не инициализирован, уведомление администратору {admin_id} не отправлено")
+        except Exception as e:
+            self.logger.error(f"Ошибка при отправке уведомления администратору {admin_id}: {e}")
+        
+    def _augment_query_for_rag(self, message_text: str) -> str:
+        """
+        Лёгкая нормализация запроса для RAG, чтобы он лучше находил ответы из базы знаний.
+        Например: "куда можно поступить в 7 лет" -> "Поступление в школу в 7 лет".
+        """
+        text = message_text.strip().lower()
+        # Простая эвристика для возраста
+        age_map = {
+            "7": ["7 лет", "семь лет"],
+            "6": ["6 лет", "шесть лет"],
+        }
+        age_detected = None
+        for age_key, variants in age_map.items():
+            if any(v in text for v in variants):
+                age_detected = age_key
+                break
+        if any(kw in text for kw in ["куда можно поступ", "куда поступ", "куда идти", "поступлен", "в какой класс", "в первый класс", "в 1 класс", "в школу"]):
+            if age_detected == "7":
+                return "Поступление в 1 класс в 7 лет"
+            if age_detected == "6":
+                return "Поступление в 1 класс в 6 лет"
+            return "Поступление в 1 класс"
+        return message_text
+
+    def _is_age_enrollment_request(self, text: str) -> bool:
+        """Распознаёт запросы вида "куда поступить в N лет", "в какой класс", "в 1 класс" и т.п."""
+        t = text.strip().lower()
+        age_keywords = [
+            "7 лет", "семь лет", "6 лет", "шесть лет", "в 1 класс", "в первый класс",
+            "в какой класс", "первый класс", "в школу", "куда поступ"
+        ]
+        return any(kw in t for kw in age_keywords)
+
     def process_message(self, user_id: int, message_text: str, payload: Optional[str] = None) -> Dict[str, Any]:
         """
         Process user message
@@ -75,24 +142,87 @@ class MessageHandler:
                     'text': "Я снова на связи! Чем могу помочь?",
                     'keyboard': self.keyboard_generator.generate_main_menu()
                 }
+            # Проверяем, не является ли это кнопкой завершения диалога
+            if payload:
+                try:
+                    payload_data = json.loads(payload)
+                    if payload_data.get("command") == "finish_dialog":
+                        self.conversation_manager.enable_ai(user_id)
+                        # Очищаем историю диалога для этого пользователя
+                        self.conversation_manager.clear_message_history(user_id)
+                        return {
+                            'text': "Диалог с менеджером завершен. Я снова на связи! Чем могу помочь?",
+                            'keyboard': self.keyboard_generator.generate_main_menu()
+                        }
+                except (json.JSONDecodeError, TypeError):
+                    pass
             # Не отправляем никаких сообщений, пока пользователь не нажмет "Завершить диалог"
             return None
+        
+        # Обрабатываем payload кнопок
+        if payload:
+            try:
+                payload_data = json.loads(payload)
+                command = payload_data.get("command")
+                if command:
+                    return self._handle_command(user_id, command, payload_data, message_text)
+            except (json.JSONDecodeError, TypeError) as e:
+                self.logger.error(f"Error parsing payload: {e}")
+        
+        # Административные команды /add и /del обрабатываются в vk_bot.py
+        # Проверяем другие административные команды (если есть)
+        if self._is_admin_command(message_text):
+            return self._handle_admin_command(user_id, message_text)
+        
+        # Проверяем первое сообщение с номером телефона
+        if self._is_first_message_with_phone(user_id, message_text):
+            return self._handle_first_message_with_phone(user_id, message_text)
+        
+        # Проверяем, указал ли пользователь время после первого сообщения с телефоном
+        if self._is_time_response_after_phone(user_id, message_text):
+            return self._handle_time_response_after_phone(user_id, message_text)
         
         # Проверяем, находится ли пользователь в процессе заполнения формы
         if conversation_state.get('state') == 'consultation_form':
             return self._handle_consultation_form(user_id, message_text, conversation_state)
         
-        # Проверяем запрос на консультацию
-        if self._is_consultation_request(message_text):
-            return self._start_consultation_form(user_id)
+        # Простое приветствие — отвечаем коротко и по-человечески без ИИ
+        if self._is_greeting(message_text):
+            response = self._generate_greeting_response()
+            self.conversation_manager.add_message(user_id, "bot", response)
+            return {
+                'text': response,
+                'keyboard': self.keyboard_generator.generate_main_menu()
+            }
         
-        # Проверяем запрос на помощь администратора
-        if self._is_admin_help_request(message_text):
+        # Проверяем прощание и благодарность (всегда обрабатываем ИИ)
+        if self._is_farewell(message_text):
+            return self._handle_farewell(user_id)
+        
+        # Проверяем вопрос о доступности мест в группе (ИИ может ответить)
+        if self._is_group_availability_request(message_text):
+            return self._handle_group_availability_request(user_id)
+        
+        # Проверяем подтверждение записи на экскурсию после вопроса о доступности
+        if self._is_excursion_confirmation(user_id, message_text):
+            return self._handle_excursion_request(user_id)
+        
+        # Проверяем подтверждение записи на экскурсию (по предыдущему вопросу бота)
+        if self._is_excursion_confirmation(user_id, message_text):
+            return self._handle_excursion_request(user_id)
+        
+        # Проверяем запрос на экскурсию (переводим на менеджера)
+        if self._is_excursion_request(message_text):
+            return self._handle_excursion_request(user_id)
+        
+        # Проверяем запрос на консультацию (переводим на менеджера)
+        if self._is_consultation_request(message_text):
             return self._handle_admin_help_request(user_id, message_text)
         
         try:
-            # Получаем релевантную информацию из RAG
-            rag_response, relevant_docs = self.rag_handler.get_rag_response(message_text)
+            # Получаем релевантную информацию из RAG (с учетом нормализации запроса)
+            rag_query = self._augment_query_for_rag(message_text)
+            rag_response, relevant_docs = self.rag_handler.get_rag_response(rag_query)
             
             # Получаем историю сообщений
             message_history = self.conversation_manager.get_message_history(user_id)
@@ -104,7 +234,7 @@ class MessageHandler:
                 context = f"\nРелевантная информация из базы знаний:\n{rag_response}\n"
                 self.logger.info(f"Found relevant RAG response: {rag_response}")
             
-            # Генерируем ответ с помощью GigaChat с учетом контекста из RAG
+            # Генерируем ответ с помощью GigaChat с учетом контекста из RAG (всегда форматируем)
             ai_response = self.ai_handler.generate_response(
                 message_text,
                 message_history,
@@ -112,15 +242,18 @@ class MessageHandler:
             )
             self.logger.info(f"Generated AI response: {ai_response}")
             
+            # Пост-обработка ответа: убираем приветствия, Markdown, повторы
+            formatted_ai_response = self.response_handler.format_response(ai_response)
+            
             # Добавляем сообщение бота в историю
-            self.logger.info(f"Adding bot response to history: {ai_response}")
-            self.conversation_manager.add_message(user_id, "bot", ai_response)
+            self.logger.info(f"Adding bot response to history: {formatted_ai_response}")
+            self.conversation_manager.add_message(user_id, "bot", formatted_ai_response)
             
             # Логируем успешный ответ
-            self.db.log_successful_ai_response(user_id, message_text, ai_response)
+            self.db.log_successful_ai_response(user_id, message_text, formatted_ai_response)
             
             return {
-                'text': ai_response,
+                'text': formatted_ai_response,
                 'keyboard': self.keyboard_generator.generate_main_menu()
             }
         except Exception as e:
@@ -134,10 +267,141 @@ class MessageHandler:
         """Check if message is a consultation request"""
         message = message.lower()
         consultation_phrases = [
-            "консультац", "записаться", "запись", "встреч", "обсуд",
-            "хочу узнать", "хочу поговорить", "нужна помощь", "нужна консультация"
+            "консультац", "встреч", "обсуд",
+            "хочу поговорить", "нужна помощь", "нужна консультация",
+            "записаться на консультацию", "записаться на встречу", "записаться на обсуждение"
         ]
-        return any(phrase in message for phrase in consultation_phrases)
+        
+        # Проверяем, содержит ли сообщение запросы на консультацию
+        if any(phrase in message for phrase in consultation_phrases):
+            # Исключаем простые информационные запросы
+            info_phrases = [
+                "хочу узнать", "расскажите", "что такое", "как работает",
+                "информация о", "про школу", "про детский сад", "про программу",
+                "какие есть", "сколько стоит", "какие программы", "какие занятия"
+            ]
+            
+            # Если это информационный запрос, не считаем консультацией
+            if any(phrase in message for phrase in info_phrases):
+                return False
+                
+            return True
+            
+        return False
+    
+    def _is_excursion_request(self, message: str) -> bool:
+        """Check if message is an excursion request"""
+        message = message.lower()
+        excursion_phrases = [
+            "экскурс", "посмотреть школу", "посмотреть детский сад", "приехать посмотреть",
+            "прийти посмотреть", "показать", "показать школу", "показать детский сад",
+            "записаться на экскурсию", "записаться на просмотр", "хочу посмотреть"
+        ]
+        return any(phrase in message for phrase in excursion_phrases)
+    
+    def _is_group_availability_request(self, message: str) -> bool:
+        """Check if message is asking about group availability"""
+        message = message.lower()
+        availability_phrases = [
+            "есть ли место", "есть ли места", "свободные места", "свободное место",
+            "набор в группу", "можно ли записаться", "принимаете ли",
+            "есть ли свободные места", "есть ли свободное место",
+            "набор открыт", "набор закрыт", "группа полная", "группа заполнена"
+        ]
+        return any(phrase in message for phrase in availability_phrases)
+    
+    def _is_excursion_confirmation(self, user_id: int, message_text: str) -> bool:
+        """Check if user is confirming excursion after availability question"""
+        # Проверяем, было ли предыдущее сообщение бота о доступности мест
+        message_history = self.conversation_manager.get_message_history(user_id)
+        if len(message_history) < 2:
+            return False
+        
+        # Получаем последнее сообщение бота
+        last_bot_message = None
+        for msg in reversed(message_history):
+            if msg.get("role") == "bot":
+                last_bot_message = msg.get("content", "")
+                break
+        
+        if not last_bot_message:
+            return False
+        
+        # Проверяем, содержало ли последнее сообщение бота предложение/вопрос о записи на экскурсию
+        last_bot_lower = last_bot_message.lower()
+        asked_about_excursion_signup = (
+            "готовы записаться на экскурсию" in last_bot_lower
+            or "хотите записаться на экскурсию" in last_bot_lower
+            or "записаться на экскурсию" in last_bot_lower
+            or ("записаться" in last_bot_lower and "экскурс" in last_bot_lower)
+            or "есть вопросы или хотите записаться на экскурсию" in last_bot_lower
+        )
+        if not asked_about_excursion_signup:
+            return False
+        
+        # Проверяем, является ли текущее сообщение подтверждением
+        message_text = message_text.lower()
+        confirmation_phrases = [
+            "да", "конечно", "готов", "готова", "хочу", "давайте", "согласен", "согласна",
+            "запишите", "запишите меня", "хочу записаться", "хочу прийти", "хочу приехать"
+        ]
+        return any(phrase in message_text for phrase in confirmation_phrases)
+    
+    def _is_farewell(self, message: str) -> bool:
+        """Check if message is a farewell or thank you"""
+        message = message.lower()
+        farewell_phrases = [
+            # Благодарности
+            "спасибо", "благодарю", "благодарен", "благодарна", "спс", "thx", "thanks",
+            "большое спасибо", "огромное спасибо", "спасибо большое", "спасибо огромное",
+            
+            # Прощания
+            "до свидания", "до встречи", "пока", "прощай", "увидимся", "всего доброго",
+            "всего хорошего", "удачи", "успехов", "хорошего дня", "хорошего вечера",
+            "хороших выходных", "хорошей недели", "хорошего настроения",
+            
+            # Завершения диалога
+            "все понятно", "все ясно", "все понятно спасибо", "все ясно спасибо",
+            "больше вопросов нет", "вопросов больше нет", "все вопросы решены",
+            "все решено", "все хорошо", "все отлично", "все супер",
+            
+            # Вежливые завершения
+            "хорошо", "ладно", "понятно", "ясно", "ок", "окей", "все", "всего"
+        ]
+        return any(phrase in message for phrase in farewell_phrases)
+    
+    def _handle_farewell(self, user_id: int) -> Dict[str, Any]:
+        """Handle farewell or thank you message"""
+        response = "Пожалуйста! В случае возникновения дополнительных вопросов, с радостью Вас проконсультируем!"
+        
+        self.conversation_manager.add_message(user_id, "bot", response)
+        return {
+            "text": response,
+            "keyboard": self.keyboard_generator.generate_main_menu()
+        }
+    
+    def _handle_group_availability_request(self, user_id: int) -> Dict[str, Any]:
+        """Handle group availability request"""
+        response = "Да, на текущий момент Вы можете присоединиться к группе. Готовы записаться на экскурсию?"
+        
+        self.conversation_manager.add_message(user_id, "bot", response)
+        return {
+            "text": response,
+            "keyboard": self.keyboard_generator.generate_main_menu()
+        }
+    
+    def _handle_excursion_request(self, user_id: int) -> Dict[str, Any]:
+        """Handle excursion request"""
+        # Отключаем ИИ для этого пользователя
+        self.conversation_manager.disable_ai(user_id)
+        
+        # Уведомляем администраторов
+        self._notify_admins_about_excursion_request(user_id)
+        
+        return {
+            'text': "Отлично, сейчас уточняем возможные дни и время для экскурсии. В ближайшее время дадим ответ",
+            'keyboard': self.keyboard_generator.generate_finish_dialog_keyboard()
+        }
     
     def _start_consultation_form(self, user_id: int) -> Dict[str, Any]:
         """Start consultation form flow"""
@@ -239,15 +503,208 @@ class MessageHandler:
                 'keyboard': self.keyboard_generator.generate_main_menu()
             }
     
+    def _is_time_response_after_phone(self, user_id: int, message_text: str) -> bool:
+        """
+        Check if this is a time response after first message with phone
+        
+        Args:
+            user_id: User ID
+            message_text: Message text
+            
+        Returns:
+            True if this is time response after phone message
+        """
+        # Получаем историю сообщений
+        message_history = self.conversation_manager.get_message_history(user_id)
+        
+        # Нужно минимум 2 сообщения: первое с телефоном и ответ бота
+        if len(message_history) < 2:
+            return False
+        
+        # Проверяем, что последнее сообщение бота содержит стандартный ответ
+        last_bot_message = None
+        for msg in reversed(message_history):
+            if msg.get('role') == 'bot':
+                last_bot_message = msg.get('content', '')
+                break
+        
+        if not last_bot_message:
+            return False
+        
+        # Проверяем, что это стандартный ответ на первое сообщение с телефоном
+        if "Укажите удобное время для звонка с 10.00 до 18.00" not in last_bot_message:
+            return False
+        
+        # Проверяем, что текущее сообщение похоже на время
+        return self._is_time_format(message_text)
+    
+    def _is_time_format(self, message: str) -> bool:
+        """
+        Check if message contains time format
+        
+        Args:
+            message: Message text
+            
+        Returns:
+            True if message contains time format
+        """
+        # Очищаем сообщение от лишних символов
+        clean_message = message.strip().lower()
+        
+        # Паттерны для времени
+        time_patterns = [
+            r'^\d{1,2}:\d{2}$',  # 10:00, 9:30
+            r'^\d{1,2}\.\d{2}$',  # 10.00, 9.30
+            r'^\d{1,2}\s\d{2}$',  # 10 00, 9 30
+            r'^\d{1,2}ч\s*\d{0,2}м?$',  # 10ч, 10ч 30м
+            r'^\d{1,2}\s*часа?\s*\d{0,2}\s*минут?$',  # 10 часов, 10 часов 30 минут
+            r'^\d{1,2}\s*часа?$',  # 10 часов
+        ]
+        
+        for pattern in time_patterns:
+            if re.match(pattern, clean_message):
+                return True
+        
+        # Проверяем простые числовые форматы времени
+        if re.match(r'^\d{1,2}$', clean_message):  # 10, 15
+            time_num = int(clean_message)
+            if 8 <= time_num <= 20:  # Разумный диапазон времени
+                return True
+        
+        return False
+    
+    def _extract_time_from_message(self, message: str) -> str:
+        """
+        Extract time from message
+        
+        Args:
+            message: Message text
+            
+        Returns:
+            Formatted time string
+        """
+        # Очищаем сообщение
+        clean_message = message.strip().lower()
+        
+        # Если это просто число, добавляем :00
+        if re.match(r'^\d{1,2}$', clean_message):
+            time_num = int(clean_message)
+            return f"{time_num:02d}:00"
+        
+        # Если это формат с двоеточием
+        if re.match(r'^\d{1,2}:\d{2}$', clean_message):
+            return clean_message
+        
+        # Если это формат с точкой
+        if re.match(r'^\d{1,2}\.\d{2}$', clean_message):
+            return clean_message.replace('.', ':')
+        
+        # Если это формат с пробелом
+        if re.match(r'^\d{1,2}\s\d{2}$', clean_message):
+            return clean_message.replace(' ', ':')
+        
+        # Для других форматов возвращаем как есть
+        return clean_message
+    
+    def _handle_time_response_after_phone(self, user_id: int, message_text: str) -> Dict[str, Any]:
+        """
+        Handle time response after first message with phone
+        
+        Args:
+            user_id: User ID
+            message_text: Message text
+            
+        Returns:
+            Response dictionary
+        """
+        # Извлекаем время из сообщения
+        time_str = self._extract_time_from_message(message_text)
+        
+        # Получаем данные пользователя
+        user_data = self.db.get_user_data(user_id)
+        phone = user_data.get('phone') if user_data else None
+        
+        # Если телефон не найден в БД, пытаемся извлечь из истории
+        if not phone:
+            message_history = self.conversation_manager.get_message_history(user_id)
+            for msg in message_history:
+                if msg.get('role') == 'user':
+                    extracted_phone = self._extract_phone_number(msg.get('content', ''))
+                    if extracted_phone:
+                        phone = extracted_phone
+                        break
+        
+        # Формируем ответ пользователю
+        response = f"Благодарим за заявку, менеджер свяжется с Вами в {time_str}"
+        
+        # Добавляем сообщение бота в историю
+        self.conversation_manager.add_message(user_id, "bot", response)
+        
+        # Уведомляем администраторов
+        if phone:
+            self._notify_admins_about_phone_time_request(user_id, phone, time_str)
+        
+        # Логируем успешный ответ
+        self.db.log_successful_ai_response(user_id, message_text, response)
+        
+        return {
+            'text': response,
+            'keyboard': self.keyboard_generator.generate_main_menu()
+        }
+    
+    def _notify_admins_about_phone_time_request(self, user_id: int, phone: str, time: str) -> None:
+        """
+        Notify admins about phone and time request
+        
+        Args:
+            user_id: User ID
+            phone: Phone number
+            time: Preferred time
+        """
+        admin_ids = self.db.get_admin_ids()
+        
+        # Получаем имя пользователя из VK API
+        user_name = self._get_vk_user_name(user_id)
+        if user_name:
+            notification = f"Пользователь {user_name} (ID: {user_id}) оставил номер телефона {phone} и просит связаться с ним в {time}"
+        else:
+            notification = f"Пользователь {user_id} оставил номер телефона {phone} и просит связаться с ним в {time}"
+        
+        for admin_id in admin_ids:
+            try:
+                self.vk.messages.send(
+                    user_id=admin_id,
+                    message=notification,
+                    random_id=0
+                )
+            except Exception as e:
+                self.logger.error(f"Ошибка при отправке уведомления администратору {admin_id}: {e}")
+    
     def _is_admin_help_request(self, message: str) -> bool:
         """Check if message is requesting admin help"""
         message = message.lower()
-        help_phrases = [
-            "оператор", "администратор", "менеджер", "помощь",
-            "человек", "поговорить с человеком", "нужен человек",
-            "свяжите с", "переключите на", "нужна помощь"
+        
+        # Только прямые запросы на администратора или запись
+        direct_admin_phrases = [
+            # Прямые запросы на администратора
+            "оператор", "администратор", "менеджер", "человек",
+            "поговорить с человеком", "нужен человек", "свяжите с",
+            "переключите на", "переключите меня", "переведите на",
+            
+            # Запросы на запись/регистрацию
+            "записаться", "запись", "регистрация", "зарегистрироваться",
+            
+            # Запросы на звонок
+            "позвоните", "позвонить", "звонок",
+            "связаться", "связаться со мной", "перезвоните",
+            
+            # Конкретные проблемы
+            "есть проблема", "не получается", "не могу", "помогите с",
+            "нужна помощь с", "требуется помощь с"
         ]
-        return any(phrase in message for phrase in help_phrases)
+        
+        # Проверяем только прямые запросы
+        return any(phrase in message for phrase in direct_admin_phrases)
     
     def _handle_admin_help_request(self, user_id: int, message: str) -> Dict[str, Any]:
         """Handle request for admin help"""
@@ -259,7 +716,7 @@ class MessageHandler:
         
         return {
             'text': "Я перевожу Вас на администратора. Пожалуйста, подождите немного.",
-            'keyboard': None
+            'keyboard': self.keyboard_generator.generate_finish_dialog_keyboard()
         }
     
     def _notify_admins_about_consultation(self, name: str, phone: str, time: str) -> None:
@@ -268,29 +725,35 @@ class MessageHandler:
         message = f"Новая заявка на консультацию:\nИмя: {name}\nТелефон: {phone}\nВремя: {time}"
         
         for admin_id in admin_ids:
-            try:
-                self.vk.messages.send(
-                    user_id=admin_id,
-                    message=message,
-                    random_id=0
-                )
-            except Exception as e:
-                self.logger.error(f"Ошибка при отправке уведомления администратору {admin_id}: {e}")
+            self._send_admin_notification(admin_id, message)
     
     def _notify_admins_about_help_request(self, user_id: int, message: str) -> None:
         """Notify admins about help request"""
         admin_ids = self.db.get_admin_ids()
-        notification = f"Пользователь {user_id} запросил помощь администратора.\nСообщение: {message}"
+        
+        # Получаем имя пользователя из VK API
+        user_name = self._get_vk_user_name(user_id)
+        if user_name:
+            notification = f"Пользователь {user_name} (ID: {user_id}) вызывает администратора.\nСообщение: {message}"
+        else:
+            notification = f"Пользователь {user_id} вызывает администратора.\nСообщение: {message}"
         
         for admin_id in admin_ids:
-            try:
-                self.vk.messages.send(
-                    user_id=admin_id,
-                    message=notification,
-                    random_id=0
-                )
-            except Exception as e:
-                self.logger.error(f"Ошибка при отправке уведомления администратору {admin_id}: {e}")
+            self._send_admin_notification(admin_id, notification)
+    
+    def _notify_admins_about_excursion_request(self, user_id: int) -> None:
+        """Notify admins about excursion request"""
+        admin_ids = self.db.get_admin_ids()
+        
+        # Получаем имя пользователя из VK API
+        user_name = self._get_vk_user_name(user_id)
+        if user_name:
+            notification = f"Пользователь {user_name} (ID: {user_id}) вызывает администратора.\nСообщение: запрос на экскурсию"
+        else:
+            notification = f"Пользователь {user_id} вызывает администратора.\nСообщение: запрос на экскурсию"
+        
+        for admin_id in admin_ids:
+            self._send_admin_notification(admin_id, notification)
     
     def _is_admin(self, user_id: int) -> bool:
         """Check if user is admin"""
@@ -335,11 +798,11 @@ class MessageHandler:
         import random
         
         greetings = [
-            "Здравствуйте! Интересуетесь образовательными программами для вашего ребенка?",
-            "Добрый день! Чем могу помочь в выборе образовательной программы для вашего ребенка?",
-            "Приветствую! Расскажите, какое направление обучения вас интересует?",
-            "Здравствуйте! Хотите узнать подробнее о наших образовательных программах?",
-            "Здравствуйте! Рассматриваете варианты образования для вашего ребенка?"
+            "Добрый день! Подскажите, что именно хотите узнать?",
+            "Здравствуйте! Чем могу помочь — стоимость, программы, расписание?",
+            "Добрый день! О чем рассказать в первую очередь: школа, садик или кружки?",
+            "Здравствуйте! Сориентировать по стоимости или рассказать про программы?",
+            "Добрый день! Готов помочь — что интересует больше всего?"
         ]
         
         return random.choice(greetings)
@@ -360,6 +823,8 @@ class MessageHandler:
         # Reset any ongoing conversation
         if command == "main_menu":
             self.conversation_manager.reset_state(user_id)
+            # Очищаем историю диалога при возврате в главное меню
+            self.conversation_manager.clear_message_history(user_id)
             return {
                 "text": "Главное меню:",
                 "keyboard": self.keyboard_generator.generate_main_menu()
@@ -398,6 +863,19 @@ class MessageHandler:
             return {
                 "text": response,
                 "keyboard": self.keyboard_generator.generate_back_button()
+            }
+        
+        # Admin help request command
+        elif command == "admin_help":
+            # Отключаем ИИ для этого пользователя
+            self.conversation_manager.disable_ai(user_id)
+            
+            # Уведомляем администраторов
+            self._notify_admins_about_help_request(user_id, "запрос на связь с администратором")
+            
+            return {
+                'text': "Я перевожу Вас на администратора. Пожалуйста, подождите немного.",
+                'keyboard': self.keyboard_generator.generate_finish_dialog_keyboard()
             }
         
         # Events list command
@@ -966,6 +1444,7 @@ class MessageHandler:
         if rag_response:
             # Проверяем уверенность в ответе
             if "не уверен" in rag_response.lower() or "возможно" in rag_response.lower():
+                # Сначала предлагаем переформулировать вопрос
                 response = "Извините, я не могу дать точный ответ на ваш вопрос. Не могли бы вы переформулировать его, чтобы я лучше понял, что именно вас интересует?"
                 self.conversation_manager.add_message(user_id, "bot", response)
                 return {
@@ -1002,10 +1481,390 @@ class MessageHandler:
             }
         
         # Если ни один метод не нашел точного ответа
-        response = "Извините, я не могу дать точный ответ на ваш вопрос. Пожалуйста, переформулируйте его, чтобы я лучше понял, что именно вас интересует. Вы также можете уточнить детали или задать более конкретный вопрос."
+        response = "Извините, я не могу дать точный ответ на ваш вопрос. Пожалуйста, переформулируйте его, чтобы я лучше понял, что именно вас интересует. Вы также можете уточнить детали или задать более конкретный вопрос. Если у вас есть сложные вопросы, требующие индивидуального подхода, вы можете связаться с нашим менеджером."
         self.conversation_manager.add_message(user_id, "bot", response)
         
         return {
             "text": response,
             "keyboard": self.keyboard_generator.generate_main_menu()
         } 
+
+    def _extract_phone_number(self, message: str) -> Optional[str]:
+        """
+        Extract phone number from message
+        
+        Args:
+            message: Message text
+            
+        Returns:
+            Phone number if found, None otherwise
+        """
+        # Паттерны для поиска номера телефона
+        phone_patterns = [
+            r'\+?7\s?\(?(\d{3})\)?\s?(\d{3})\s?(\d{2})\s?(\d{2})',  # +7 (XXX) XXX XX XX
+            r'8\s?\(?(\d{3})\)?\s?(\d{3})\s?(\d{2})\s?(\d{2})',    # 8 (XXX) XXX XX XX
+            r'\+?7(\d{10})',  # +7XXXXXXXXXX
+            r'8(\d{10})',     # 8XXXXXXXXXX
+            r'(\d{3})\s?(\d{3})\s?(\d{2})\s?(\d{2})',  # XXX XXX XX XX
+        ]
+        
+        for pattern in phone_patterns:
+            match = re.search(pattern, message)
+            if match:
+                if len(match.groups()) == 4:
+                    # Формат с группами
+                    return f"+7{match.group(1)}{match.group(2)}{match.group(3)}{match.group(4)}"
+                elif len(match.groups()) == 1:
+                    # Формат с одной группой
+                    return f"+7{match.group(1)}"
+        
+        return None
+    
+    def _extract_name(self, message: str) -> Optional[str]:
+        """
+        Extract name from message (simple heuristic)
+        
+        Args:
+            message: Message text
+            
+        Returns:
+            Name if found, None otherwise
+        """
+        # Удаляем номер телефона из сообщения для поиска имени
+        phone = self._extract_phone_number(message)
+        if phone:
+            message = message.replace(phone, '').strip()
+        
+        # Ищем слова с заглавной буквы (возможные имена)
+        words = message.split()
+        names = []
+        
+        for word in words:
+            # Убираем знаки препинания
+            clean_word = re.sub(r'[^\w\s]', '', word)
+            if clean_word and clean_word[0].isupper() and len(clean_word) > 1:
+                # Проверяем, что это не служебные слова
+                if clean_word.lower() not in ['привет', 'здравствуйте', 'добрый', 'доброе', 'просто', 'текст', 'без', 'имени', 'телефона', 'номер', 'мой', 'ваш', 'наш']:
+                    names.append(clean_word)
+        
+        if names:
+            return ' '.join(names[:2])  # Возвращаем максимум 2 слова (имя и фамилия)
+        
+        return None
+    
+    def _is_first_message_with_phone(self, user_id: int, message_text: str) -> bool:
+        """
+        Check if this is the first message from user containing a phone number
+        
+        Args:
+            user_id: User ID
+            message_text: Message text
+            
+        Returns:
+            True if this is first message with phone number
+        """
+        # Проверяем, есть ли номер телефона в сообщении
+        phone = self._extract_phone_number(message_text)
+        if not phone:
+            return False
+        
+        # Проверяем, есть ли история диалога
+        message_history = self.conversation_manager.get_message_history(user_id)
+        
+        # Если это первое сообщение (история пустая или содержит только текущее сообщение)
+        if len(message_history) <= 1:
+            return True
+        
+        return False
+    
+    def _handle_first_message_with_phone(self, user_id: int, message_text: str) -> Dict[str, Any]:
+        """
+        Handle first message from user containing a phone number
+        
+        Args:
+            user_id: User ID
+            message_text: Message text
+            
+        Returns:
+            Response dictionary
+        """
+        # Извлекаем номер телефона и имя из сообщения
+        phone = self._extract_phone_number(message_text)
+        name = self._extract_name(message_text)
+        
+        # Если имя не найдено в сообщении, пытаемся получить из VK API
+        if not name:
+            name = self._get_vk_user_name(user_id)
+        
+        # Если имя все еще не найдено, используем "Клиент"
+        if not name:
+            name = "Клиент"
+        
+        # Сохраняем данные пользователя в базу данных
+        try:
+            # Обновляем или создаем пользователя с телефоном
+            user_data = self.db.get_user_data(user_id)
+            if user_data:
+                # Обновляем существующего пользователя
+                self.db.update_user_phone(user_id, phone)
+            else:
+                # Создаем нового пользователя
+                self.db.create_user(user_id, name, phone, None)
+        except Exception as e:
+            self.logger.error(f"Error saving user data: {e}")
+        
+        # Формируем ответ согласно требованиям
+        response = f"Здравствуйте, {name}! Укажите удобное время для звонка с 10.00 до 18.00 в любой будний день. Менеджер обязательно с Вами свяжется."
+        
+        # Добавляем сообщение бота в историю
+        self.conversation_manager.add_message(user_id, "bot", response)
+        
+        # Логируем успешный ответ
+        self.db.log_successful_ai_response(user_id, message_text, response)
+        
+        return {
+            'text': response,
+            'keyboard': self.keyboard_generator.generate_main_menu()
+        }
+    
+    def _get_vk_user_name(self, user_id: int) -> Optional[str]:
+        """
+        Get user name from VK API
+        
+        Args:
+            user_id: VK user ID
+            
+        Returns:
+            User name or None if not found
+        """
+        try:
+            # Инициализируем VK API
+            vk_session = vk_api.VkApi(token=VK_TOKEN)
+            vk = vk_session.get_api()
+            
+            # Получаем информацию о пользователе
+            user_info = vk.users.get(user_ids=user_id, fields='first_name,last_name')
+            
+            if user_info and len(user_info) > 0:
+                user = user_info[0]
+                first_name = user.get('first_name', '')
+                last_name = user.get('last_name', '')
+                
+                # Формируем полное имя
+                if first_name and last_name:
+                    return f"{first_name} {last_name}"
+                elif first_name:
+                    return first_name
+                elif last_name:
+                    return last_name
+                else:
+                    return None
+            else:
+                return None
+                
+        except VkApiError as e:
+            self.logger.error(f"VK API error getting user info for {user_id}: {e}")
+            return None
+        except Exception as e:
+            self.logger.error(f"Error getting user info from VK for {user_id}: {e}")
+            return None
+
+    def _is_admin_command(self, message: str) -> bool:
+        """
+        Check if message is an admin command
+        
+        Args:
+            message: Message text
+            
+        Returns:
+            True if message is an admin command
+        """
+        message = message.strip()
+        return message.startswith('/add ') or message.startswith('/del ')
+
+    def _handle_admin_command(self, user_id: int, message: str) -> Dict[str, Any]:
+        """
+        Handle admin commands (/add, /del)
+        
+        Args:
+            user_id: User ID
+            message: Message text
+            
+        Returns:
+            Response dictionary
+        """
+        # Проверяем, является ли пользователь администратором
+        if not self._is_admin(user_id):
+            return {
+                'text': "У вас нет прав для выполнения административных команд.",
+                'keyboard': self.keyboard_generator.generate_main_menu()
+            }
+        
+        message = message.strip()
+        
+        # Обрабатываем команду /add
+        if message.startswith('/add '):
+            return self._handle_add_admin_command(user_id, message)
+        
+        # Обрабатываем команду /del
+        elif message.startswith('/del '):
+            return self._handle_del_admin_command(user_id, message)
+        
+        else:
+            return {
+                'text': "Неизвестная административная команда. Используйте /add <ID> или /del <ID>",
+                'keyboard': self.keyboard_generator.generate_main_menu()
+            }
+
+    def _handle_add_admin_command(self, user_id: int, message: str) -> Dict[str, Any]:
+        """
+        Handle /add admin command
+        
+        Args:
+            user_id: User ID of the command sender
+            message: Full message text
+            
+        Returns:
+            Response dictionary
+        """
+        try:
+            # Извлекаем ID из команды
+            parts = message.split()
+            if len(parts) != 2:
+                return {
+                    'text': "Неверный формат команды. Используйте: /add <VK_ID>",
+                    'keyboard': self.keyboard_generator.generate_main_menu()
+                }
+            
+            target_vk_id = int(parts[1])
+            
+            # Проверяем, что ID положительный
+            if target_vk_id <= 0:
+                return {
+                    'text': "VK ID должен быть положительным числом.",
+                    'keyboard': self.keyboard_generator.generate_main_menu()
+                }
+            
+            # Получаем имя пользователя из VK API
+            user_name = self._get_vk_user_name(target_vk_id)
+            if not user_name:
+                user_name = "Неизвестный пользователь"
+            
+            # Проверяем, существует ли пользователь в базе
+            existing_user = self.db.session.query(self.db.User).filter_by(vk_id=target_vk_id).first()
+            
+            if existing_user:
+                # Пользователь существует, обновляем статус администратора
+                existing_user.is_admin = True
+                if not existing_user.name:
+                    existing_user.name = user_name
+                self.db.session.commit()
+                response = f"✅ Пользователь {user_name} (ID: {target_vk_id}) назначен администратором"
+            else:
+                # Создаем нового пользователя-администратора
+                new_admin = self.db.User(
+                    vk_id=target_vk_id,
+                    name=user_name,
+                    is_admin=True
+                )
+                self.db.session.add(new_admin)
+                self.db.session.commit()
+                response = f"✅ Создан новый администратор {user_name} (ID: {target_vk_id})"
+            
+            self.logger.info(f"Admin {user_id} added admin {target_vk_id} ({user_name})")
+            
+            return {
+                'text': response,
+                'keyboard': self.keyboard_generator.generate_main_menu()
+            }
+            
+        except ValueError:
+            return {
+                'text': "VK ID должен быть числом. Используйте: /add <VK_ID>",
+                'keyboard': self.keyboard_generator.generate_main_menu()
+            }
+        except Exception as e:
+            self.logger.error(f"Error adding admin {target_vk_id}: {e}")
+            self.db.session.rollback()
+            return {
+                'text': f"❌ Ошибка при добавлении администратора: {str(e)}",
+                'keyboard': self.keyboard_generator.generate_main_menu()
+            }
+
+    def _handle_del_admin_command(self, user_id: int, message: str) -> Dict[str, Any]:
+        """
+        Handle /del admin command
+        
+        Args:
+            user_id: User ID of the command sender
+            message: Full message text
+            
+        Returns:
+            Response dictionary
+        """
+        try:
+            # Извлекаем ID из команды
+            parts = message.split()
+            if len(parts) != 2:
+                return {
+                    'text': "Неверный формат команды. Используйте: /del <VK_ID>",
+                    'keyboard': self.keyboard_generator.generate_main_menu()
+                }
+            
+            target_vk_id = int(parts[1])
+            
+            # Проверяем, что ID положительный
+            if target_vk_id <= 0:
+                return {
+                    'text': "VK ID должен быть положительным числом.",
+                    'keyboard': self.keyboard_generator.generate_main_menu()
+                }
+            
+            # Проверяем, не пытается ли пользователь удалить сам себя
+            if target_vk_id == user_id:
+                return {
+                    'text': "❌ Вы не можете удалить права администратора у самого себя.",
+                    'keyboard': self.keyboard_generator.generate_main_menu()
+                }
+            
+            # Ищем пользователя в базе
+            user = self.db.session.query(self.db.User).filter_by(vk_id=target_vk_id).first()
+            
+            if not user:
+                return {
+                    'text': f"❌ Пользователь с ID {target_vk_id} не найден в базе данных.",
+                    'keyboard': self.keyboard_generator.generate_main_menu()
+                }
+            
+            if not user.is_admin:
+                return {
+                    'text': f"❌ Пользователь {user.name or target_vk_id} не является администратором.",
+                    'keyboard': self.keyboard_generator.generate_main_menu()
+                }
+            
+            # Удаляем права администратора
+            user.is_admin = False
+            self.db.session.commit()
+            
+            user_name = user.name or f"ID: {target_vk_id}"
+            response = f"✅ Права администратора удалены у пользователя {user_name}"
+            
+            self.logger.info(f"Admin {user_id} removed admin rights from {target_vk_id} ({user_name})")
+            
+            return {
+                'text': response,
+                'keyboard': self.keyboard_generator.generate_main_menu()
+            }
+            
+        except ValueError:
+            return {
+                'text': "VK ID должен быть числом. Используйте: /del <VK_ID>",
+                'keyboard': self.keyboard_generator.generate_main_menu()
+            }
+        except Exception as e:
+            self.logger.error(f"Error removing admin {target_vk_id}: {e}")
+            self.db.session.rollback()
+            return {
+                'text': f"❌ Ошибка при удалении прав администратора: {str(e)}",
+                'keyboard': self.keyboard_generator.generate_main_menu()
+            }

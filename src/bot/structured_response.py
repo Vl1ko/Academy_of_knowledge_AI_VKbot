@@ -30,30 +30,41 @@ class StructuredResponseHandler:
         Returns:
             Отформатированный ответ
         """
-        # Разделяем текст на абзацы
-        paragraphs = [p.strip() for p in answer.split('\n') if p.strip()]
+        # Убираем приветствия из начала ответа
+        lines = answer.split('\n')
+        cleaned_lines = []
         
-        # Форматируем каждый абзац
-        formatted_paragraphs = []
-        for p in paragraphs:
-            # Если это список (начинается с - или •)
-            if p.startswith(('-', '•', '✓', '✔', '✅')):
-                formatted_paragraphs.append(p)
-            # Если это цена
-            elif re.search(r'\d+\s*(?:руб(?:лей)?|₽)', p, re.IGNORECASE):
-                formatted_paragraphs.append(self._format_price_info(p))
-            else:
-                formatted_paragraphs.append(p)
+        for line in lines:
+            line = line.strip()
+            if line:
+                # Пропускаем строки с приветствиями
+                if any(greeting in line.lower() for greeting in ['здравствуйте', 'добрый день', 'доброе утро', 'добрый вечер', 'привет']):
+                    continue
+                cleaned_lines.append(line)
         
-        # Добавляем уточняющий вопрос в конце
-        follow_up = self._get_follow_up_question(answer)
-        if follow_up:
-            formatted_paragraphs.append(f"\n{follow_up}")
-            
-        # Добавляем информацию о времени для звонка
-        formatted_paragraphs.append("\nУкажите удобное время для звонка в будний день с 10:00 до 17:00")
+        # Объединяем строки без лишнего форматирования
+        result = '\n'.join(cleaned_lines)
         
-        return "\n\n".join(formatted_paragraphs)
+        # Убираем markdown форматирование
+        result = re.sub(r'\*\*(.*?)\*\*', r'\1', result)  # Убираем **жирный**
+        result = re.sub(r'\*(.*?)\*', r'\1', result)      # Убираем *курсив*
+        result = re.sub(r'`(.*?)`', r'\1', result)        # Убираем `код`
+        result = re.sub(r'#+\s*', '', result)             # Убираем заголовки
+        result = re.sub(r'\[(.*?)\]\(.*?\)', r'\1', result)  # Убираем ссылки
+        
+        # Удаляем подряд идущие дублирующиеся строки (повторяющиеся пункты)
+        deduped_lines = []
+        seen_prev = None
+        for ln in result.split('\n'):
+            if ln != seen_prev:
+                deduped_lines.append(ln)
+            seen_prev = ln
+        result = '\n'.join(deduped_lines)
+
+        # Сжимаем лишние пустые строки (не более одной подряд)
+        result = re.sub(r'\n{3,}', '\n\n', result)
+
+        return result
     
     def _format_price_info(self, text: str) -> str:
         """
